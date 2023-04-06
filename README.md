@@ -1,6 +1,6 @@
 ## Simple Hierarchical Transformer (wip)
 
-Experiments around a simple idea for inducing a hierarchical predictive model within a GPT. It is so simple, it may not work. But then again, deep learning progress is built on the bedrocks of simple ideas. Worth a shot.
+Experiments around a simple idea for inducing multiple hierarchical predictive coding models within a GPT. It is so simple, it may not work. But then again, deep learning progress is built on the bedrocks of simple ideas. Worth a shot.
 
 ## Appreciation
 
