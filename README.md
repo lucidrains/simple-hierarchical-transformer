@@ -2,6 +2,10 @@
 
 Experiments around a simple idea for inducing a hierarchical predictive model within a GPT. It is so simple, it may not work. But then again, deep learning progress is built on the bedrocks of simple ideas. Worth a shot.
 
+## Appreciation
+
+- <a href="https://stability.ai/">StabilityAI</a> for the sponsorship to carry out this independent research
+
 ## Citations
 
 Closest idea would be <a href="https://arxiv.org/abs/2110.13711">hourglass transformers</a>
