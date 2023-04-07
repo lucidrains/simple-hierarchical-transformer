@@ -19,6 +19,7 @@ setup(
   ],
   install_requires=[
     'einops>=0.4',
+    'local-attention',
     'torch>=1.6',
   ],
   classifiers=[
