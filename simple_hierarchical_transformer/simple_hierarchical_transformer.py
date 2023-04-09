@@ -1,3 +1,5 @@
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
@@ -19,6 +21,8 @@ def default(*vals):
 
 mlist = nn.ModuleList
 
+Linear = partial(nn.Linear, bias = False)
+
 # classes
 
 class RMSNorm(nn.Module):
@@ -33,9 +37,9 @@ class RMSNorm(nn.Module):
 def FeedForward(dim, mult = 4):
     dim_inner = int(dim * mult)
     return nn.Sequential(
-        nn.Linear(dim, dim_inner),
+        Linear(dim, dim_inner),
         nn.GELU(),
-        nn.Linear(dim_inner, dim)
+        Linear(dim_inner, dim)
     )
 
 class Attention(nn.Module):
@@ -53,8 +57,8 @@ class Attention(nn.Module):
 
         self.attend = Attend(causal = True, use_flash_attn = use_flash_attn)
 
-        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
-        self.to_out = nn.Linear(dim_inner, dim, bias = False)
+        self.to_qkv = Linear(dim, dim_inner * 3)
+        self.to_out = Linear(dim_inner, dim)
 
     def forward(self, x):
         n = x.shape[-2]
