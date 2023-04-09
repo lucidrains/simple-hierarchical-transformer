@@ -1,3 +1,2 @@
 from simple_hierarchical_transformer.simple_hierarchical_transformer import HierarchicalTransformer
-from simple_hierarchical_transformer.autoregressive_wrapper import AutoregressiveWrapper
 

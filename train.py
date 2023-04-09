@@ -8,7 +8,7 @@ from torch.optim import Adam
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from simple_hierarchical_transformer import HierarchicalTransformer, AutoregressiveWrapper
+from simple_hierarchical_transformer import HierarchicalTransformer
 
 # constants
 
@@ -43,9 +43,7 @@ model = HierarchicalTransformer(
     depth = 8,
     seq_len = SEQ_LEN,
     use_flash_attn = True
-)
-
-model = AutoregressiveWrapper(model).cuda()
+).cuda()
 
 # prepare enwik8 data
 
@@ -83,7 +81,7 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
     model.train()
 
     for _ in range(GRADIENT_ACCUMULATE_EVERY):
-        loss = model(next(train_loader))
+        loss = model(next(train_loader), return_loss = True)
         loss.backward(loss / GRADIENT_ACCUMULATE_EVERY)
 
     print(f"training loss: {loss.item()}")
@@ -95,7 +93,7 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
     if i % VALIDATE_EVERY == 0:
         model.eval()
         with torch.no_grad():
-            loss = model(next(val_loader))
+            loss = model(next(val_loader), return_loss = True)
             print(f"validation loss: {loss.item()}")
 
     if i % GENERATE_EVERY == 0:

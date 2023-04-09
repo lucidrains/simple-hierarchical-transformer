@@ -23,6 +23,24 @@ mlist = nn.ModuleList
 
 Linear = partial(nn.Linear, bias = False)
 
+# sampling helpers
+
+def eval_decorator(fn):
+    def inner(model, *args, **kwargs):
+        was_training = model.training
+        model.eval()
+        out = fn(model, *args, **kwargs)
+        model.train(was_training)
+        return out
+    return inner
+
+def top_k(logits, thres = 0.9):
+    k = int((1 - thres) * logits.shape[-1])
+    val, ind = torch.topk(logits, k)
+    probs = torch.full_like(logits, -torch.finfo(logits.dtype).max)
+    probs.scatter_(1, ind, val)
+    return probs
+
 # classes
 
 class RMSNorm(nn.Module):
@@ -81,10 +99,12 @@ class HierarchicalTransformer(nn.Module):
         dim_head = 64,
         heads = 8,
         ff_mult = 4,
-        use_flash_attn = False
+        use_flash_attn = False,
+        ignore_index = 0
     ):
         super().__init__()
         self.seq_len = seq_len
+        self.ignore_index = ignore_index
 
         self.token_emb = nn.Embedding(num_tokens, dim)
 
@@ -107,11 +127,49 @@ class HierarchicalTransformer(nn.Module):
             nn.Linear(dim, num_tokens, bias = False)
         )
 
-    def forward(self, x):
+    @torch.no_grad()
+    @eval_decorator
+    def generate(
+        self,
+        prompt,
+        seq_len,
+        temperature=1.0,
+        filter_thres=0.9,
+        **kwargs
+    ):
+        b, t, device = *prompt.shape, prompt.device
+
+        out = prompt
+
+        for _ in range(seq_len):
+            logits = self.forward(out[:, -self.seq_len:], **kwargs)[:, -1]
+
+            filtered_logits = top_k(logits, thres = filter_thres)
+            probs = F.softmax(filtered_logits / temperature, dim = -1)
+
+            sample = torch.multinomial(probs, 1)
+            out = torch.cat((out, sample), dim = -1)
+
+        return out[:, t:]
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+    
+    def forward(self, x, return_loss = False):
+        if return_loss:
+            x, labels = x[:, :-1], x[:, 1:]
+
         x = self.token_emb(x)
 
         for (attn_prenorm, attn), (ff_prenorm, ff) in self.layers:
             x = attn(attn_prenorm(x)) + x
             x = ff(ff_prenorm(x)) + x
 
-        return self.to_logits(x)
+        logits = self.to_logits(x)
+
+        if not return_loss:
+            return logits
+
+        logits = rearrange(logits, 'b n c -> b c n')
+        return F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
