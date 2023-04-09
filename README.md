@@ -34,3 +34,13 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
     year    = {2022}
 }
 ```
+
+```bibtex
+@article{Yan2020ProphetNetPF,
+    title   = {ProphetNet: Predicting Future N-gram for Sequence-to-Sequence Pre-training},
+    author  = {Yu Yan and Weizhen Qi and Yeyun Gong and Dayiheng Liu and Nan Duan and Jiusheng Chen and Ruofei Zhang and Ming Zhou},
+    journal = {ArXiv},
+    year    = {2020},
+    volume  = {abs/2001.04063}
+}
+```
