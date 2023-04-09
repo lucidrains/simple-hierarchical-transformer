@@ -41,7 +41,8 @@ model = HierarchicalTransformer(
     num_tokens = 256,
     dim = 512,
     depth = 8,
-    seq_len = SEQ_LEN
+    seq_len = SEQ_LEN,
+    use_flash_attn = True
 )
 
 model = AutoregressiveWrapper(model).cuda()

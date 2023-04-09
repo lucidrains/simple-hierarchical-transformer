@@ -4,6 +4,8 @@ from torch import nn, einsum
 
 from einops import rearrange
 
+from simple_hierarchical_transformer.attention import Attend
+
 # helper functions
 
 def exists(val):
@@ -41,12 +43,15 @@ class Attention(nn.Module):
         self,
         dim,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        use_flash_attn = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
         self.heads = heads
         dim_inner = dim_head * heads
+
+        self.attend = Attend(causal = True, use_flash_attn = use_flash_attn)
 
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias = False)
         self.to_out = nn.Linear(dim_inner, dim, bias = False)
@@ -55,16 +60,9 @@ class Attention(nn.Module):
         n = x.shape[-2]
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
-        q = q * self.scale
 
-        sim = einsum('b h i d, b h j d -> b h i j', q, k)
+        out = self.attend(q, k, v)
 
-        causal_mask = torch.ones((n, n), device = x.device, dtype = torch.bool).triu(1)
-        sim = sim.masked_fill(causal_mask, -torch.finfo(sim.dtype).max)
-
-        attn = sim.softmax(dim = -1)
-
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
@@ -78,7 +76,8 @@ class HierarchicalTransformer(nn.Module):
         seq_len = 2048,
         dim_head = 64,
         heads = 8,
-        ff_mult = 4
+        ff_mult = 4,
+        use_flash_attn = False
     ):
         super().__init__()
         self.seq_len = seq_len
@@ -91,7 +90,7 @@ class HierarchicalTransformer(nn.Module):
             self.layers.append(mlist([
                 mlist([
                     RMSNorm(dim),
-                    Attention(dim = dim, dim_head = dim_head, heads = heads),
+                    Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash_attn = use_flash_attn),
                 ]),
                 mlist([
                     RMSNorm(dim),
