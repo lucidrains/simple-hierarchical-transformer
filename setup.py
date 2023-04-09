@@ -18,9 +18,10 @@ setup(
     'hierarchical'
   ],
   install_requires=[
+    'accelerate',
     'einops>=0.4',
     'local-attention',
-    'torch>=1.6',
+    'torch>=1.6'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',

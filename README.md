@@ -6,6 +6,8 @@ Experiments around a simple idea for inducing multiple hierarchical predictive c
 
 - <a href="https://stability.ai/">StabilityAI</a> for the sponsorship to carry out this independent research
 
+- <a href="https://huggingface.co/">🤗 Huggingface</a> for their accelerate library
+
 ## Citations
 
 Closest idea would be <a href="https://arxiv.org/abs/2110.13711">hourglass transformers</a>.
