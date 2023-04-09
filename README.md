@@ -8,7 +8,9 @@ Experiments around a simple idea for inducing multiple hierarchical predictive c
 
 ## Citations
 
-Closest idea would be <a href="https://arxiv.org/abs/2110.13711">hourglass transformers</a>
+Closest idea would be <a href="https://arxiv.org/abs/2110.13711">hourglass transformers</a>.
+
+And my renewed interest in hierarchical approaches came from reading <a href="https://www.nature.com/articles/s41562-022-01516-2">this</a>.
 
 ```bibtex
 @article{Nawrot2021HierarchicalTA,
