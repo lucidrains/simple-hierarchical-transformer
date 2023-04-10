@@ -20,7 +20,6 @@ setup(
   install_requires=[
     'accelerate',
     'einops>=0.4',
-    'local-attention',
     'torch>=1.6',
     'vector-quantize-pytorch'
   ],

@@ -8,6 +8,12 @@ from einops import rearrange
 
 from simple_hierarchical_transformer.attention import Attend
 
+# constants
+
+mlist = nn.ModuleList
+
+Linear = partial(nn.Linear, bias = False)
+
 # helper functions
 
 def exists(val):
@@ -19,12 +25,6 @@ def default(*vals):
             return val
     return None
 
-mlist = nn.ModuleList
-
-Linear = partial(nn.Linear, bias = False)
-
-# sampling helpers
-
 def eval_decorator(fn):
     def inner(model, *args, **kwargs):
         was_training = model.training
@@ -33,6 +33,18 @@ def eval_decorator(fn):
         model.train(was_training)
         return out
     return inner
+
+# sampling helpers
+
+def log(t, eps = 1e-20):
+    return t.clamp(min = eps).log()
+
+def gumbel_noise(t):
+    noise = torch.zeros_like(t).uniform_(0, 1)
+    return -log(-log(noise))
+
+def gumbel_sample(t, temperature = 1., dim = -1):
+    return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim)
 
 def top_k(logits, thres = 0.9):
     k = int((1 - thres) * logits.shape[-1])
@@ -133,8 +145,8 @@ class HierarchicalTransformer(nn.Module):
         self,
         prompt,
         seq_len,
-        temperature=1.0,
-        filter_thres=0.9,
+        temperature = 1.0,
+        filter_thres = 0.9,
         **kwargs
     ):
         b, t, device = *prompt.shape, prompt.device
@@ -143,11 +155,9 @@ class HierarchicalTransformer(nn.Module):
 
         for _ in range(seq_len):
             logits = self.forward(out[:, -self.seq_len:], **kwargs)[:, -1]
-
             filtered_logits = top_k(logits, thres = filter_thres)
-            probs = F.softmax(filtered_logits / temperature, dim = -1)
-
-            sample = torch.multinomial(probs, 1)
+            sample = gumbel_sample(filtered_logits, temperature = temperature)
+            sample = rearrange(sample, 'b -> b 1')
             out = torch.cat((out, sample), dim = -1)
 
         return out[:, t:]
@@ -156,7 +166,11 @@ class HierarchicalTransformer(nn.Module):
     def device(self):
         return next(self.parameters()).device
     
-    def forward(self, x, return_loss = False):
+    def forward(
+        self,
+        x,
+        return_loss = False
+    ):
         if return_loss:
             x, labels = x[:, :-1], x[:, 1:]
 
