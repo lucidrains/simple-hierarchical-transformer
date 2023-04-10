@@ -44,3 +44,22 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
     volume  = {abs/2001.04063}
 }
 ```
+
+```bibtex
+@misc{su2021roformer,
+    title   = {RoFormer: Enhanced Transformer with Rotary Position Embedding},
+    author  = {Jianlin Su and Yu Lu and Shengfeng Pan and Bo Wen and Yunfeng Liu},
+    year    = {2021},
+    eprint  = {2104.09864},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CL}
+}
+```
+
+```bibtex
+@inproceedings{Sun2022ALT,
+    title     = {A Length-Extrapolatable Transformer},
+    author    = {Yutao Sun and Li Dong and Barun Patra and Shuming Ma and Shaohan Huang and Alon Benhaim and Vishrav Chaudhary and Xia Song and Furu Wei},
+    year      = {2022}
+}
+```

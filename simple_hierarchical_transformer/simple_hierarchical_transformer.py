@@ -53,6 +53,52 @@ def top_k(logits, thres = 0.9):
     probs.scatter_(1, ind, val)
     return probs
 
+# rotary positional embedding w/ xpos
+# https://arxiv.org/abs/2104.09864
+# https://arxiv.org/abs/2212.10554v1
+
+class RotaryEmbedding(nn.Module):
+    def __init__(
+        self,
+        dim,
+        scale_base = 512,
+        use_xpos = True
+    ):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+        self.use_xpos = use_xpos
+        self.scale_base = scale_base
+        scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
+        self.register_buffer('scale', scale)
+
+    @property
+    def device(self):
+        return next(self.buffers()).device
+
+    def forward(self, seq_len):
+        device = self.device
+        t = torch.arange(seq_len, device = device).type_as(self.inv_freq)
+        freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
+        freqs = torch.cat((freqs, freqs), dim = -1)
+
+        if not self.use_xpos:
+            return freqs, torch.ones(1, device = device)
+
+        power = (t - (seq_len // 2)) / self.scale_base
+        scale = self.scale ** rearrange(power, 'n -> n 1')
+        scale = torch.cat((scale, scale), dim = -1)
+
+        return freqs, scale
+
+def rotate_half(x):
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(pos, t, scale = 1.):
+    return (t * pos.cos() * scale) + (rotate_half(t) * pos.sin() * scale)
+
 # classes
 
 class RMSNorm(nn.Module):
@@ -67,6 +113,7 @@ class RMSNorm(nn.Module):
 def FeedForward(dim, mult = 4):
     dim_inner = int(dim * mult)
     return nn.Sequential(
+        RMSNorm(dim),
         Linear(dim, dim_inner),
         nn.GELU(),
         Linear(dim_inner, dim)
@@ -85,15 +132,27 @@ class Attention(nn.Module):
         self.heads = heads
         dim_inner = dim_head * heads
 
+        self.norm = RMSNorm(dim)
         self.attend = Attend(causal = True, use_flash_attn = use_flash_attn)
 
         self.to_qkv = Linear(dim, dim_inner * 3)
         self.to_out = Linear(dim_inner, dim)
 
-    def forward(self, x):
+    def forward(
+        self,
+        x,
+        rotary_emb = None
+    ):
         n = x.shape[-2]
+        x = self.norm(x)
+
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
+
+        if exists(rotary_emb):
+            freqs, scale = rotary_emb
+            q = apply_rotary_pos_emb(freqs, q, scale)
+            k = apply_rotary_pos_emb(freqs, k, scale ** -1)
 
         out = self.attend(q, k, v)
 
@@ -122,21 +181,17 @@ class HierarchicalTransformer(nn.Module):
 
         self.layers = mlist([])
 
+        self.rotary_emb = RotaryEmbedding(dim_head)
+
         for _ in range(depth):
             self.layers.append(mlist([
-                mlist([
-                    RMSNorm(dim),
-                    Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash_attn = use_flash_attn),
-                ]),
-                mlist([
-                    RMSNorm(dim),
-                    FeedForward(dim = dim, mult = ff_mult)
-                ])
+                Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash_attn = use_flash_attn),
+                FeedForward(dim = dim, mult = ff_mult)
             ]))
 
         self.to_logits = nn.Sequential(
             RMSNorm(dim),
-            nn.Linear(dim, num_tokens, bias = False)
+            Linear(dim, num_tokens)
         )
 
     @torch.no_grad()
@@ -174,11 +229,15 @@ class HierarchicalTransformer(nn.Module):
         if return_loss:
             x, labels = x[:, :-1], x[:, 1:]
 
+        n = x.shape[-1]
+
         x = self.token_emb(x)
 
-        for (attn_prenorm, attn), (ff_prenorm, ff) in self.layers:
-            x = attn(attn_prenorm(x)) + x
-            x = ff(ff_prenorm(x)) + x
+        pos_emb = self.rotary_emb(n)
+
+        for attn, ff in self.layers:
+            x = attn(x, rotary_emb = pos_emb) + x
+            x = ff(x) + x
 
         logits = self.to_logits(x)
 
