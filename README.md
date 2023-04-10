@@ -4,6 +4,8 @@ Experiments around a simple idea for inducing multiple hierarchical predictive c
 
 So far, the idea has passed the litmus test from a research friend. Will bring it to completion in the next week or so. If it does not work out, I'll leave the negative experimental results as well as the repository around, and maybe some PhD student can build upon it.
 
+<a href="https://api.wandb.ai/links/lucidrains/w8vdkz75">Ongoing experiments</a>
+
 Update: I think it is working 🤞 
 
 ## Appreciation
