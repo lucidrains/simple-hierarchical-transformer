@@ -22,6 +22,7 @@ Update: I think it is working 🤞
 - [ ] auto-set window size to be half of max sequence length for fine and all hierarchies
 - [ ] build out simple local attention block, for use across all hierarchies
 - [ ] add flash attention to local attention library
+- [ ] figure out if attention can be shared across hierarchies
 
 ## Appreciation
 
