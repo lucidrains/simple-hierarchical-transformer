@@ -10,6 +10,8 @@ from einops.layers.torch import Rearrange
 
 from simple_hierarchical_transformer.attention import Attend
 
+from local_attention import LocalMHA
+
 # constants
 
 mlist = nn.ModuleList
@@ -102,6 +104,12 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotary_pos_emb(pos, t, scale = 1.):
+    seq_len = t.shape[-2]
+
+    pos = pos[..., -seq_len:, :]
+    if not isinstance(scale, (int, float)):
+        scale = scale[..., -seq_len:, :]
+
     return (t * pos.cos() * scale) + (rotate_half(t) * pos.sin() * scale)
 
 def apply_rotary_pos_emb_qk(rotary_emb, q, k):
@@ -179,6 +187,40 @@ class Compress(nn.Module):
         unfolded = rearrange(unfolded, 'b (d c) n -> (b n) c d', c = factor)
 
         return pooled, unfolded
+
+class HierarchicalMerge(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_hierarchies = 2 # 2 for now
+    ):
+        super().__init__()
+        self.norm = RMSNorm(dim)
+        self.h_norm = RMSNorm(dim)
+
+        # simple dsconv for now
+
+        self.num_hierarchies = num_hierarchies
+
+        self.conv = nn.Conv1d(dim, dim, num_hierarchies, stride = num_hierarchies, groups = dim)
+
+    def forward(self, x, h):
+        """
+        einops notations:
+        b - batch
+        h - hierarchies
+        n - sequence length
+        d - dimension
+        """
+        nh = self.num_hierarchies
+
+        x = self.norm(x)
+        h = self.h_norm(h)
+
+        x = rearrange([x, h], 'h b n d -> b d (n h)')
+        x = self.conv(x)
+        x = rearrange(x, 'b d n -> b n d')
+        return x
 
 # classes
 
@@ -259,7 +301,9 @@ class HierarchicalTransformer(nn.Module):
         use_flash_attn = False,
         ignore_index = 0,
         compress_factor = 1,
-        recon_loss_weight = 0.1
+        recon_loss_weight = 0.1,
+        hierarchical_window_size = 64,
+        fine_window_size = 64
     ):
         super().__init__()
         assert is_power_of_two(compress_factor)
@@ -268,6 +312,8 @@ class HierarchicalTransformer(nn.Module):
         self.ignore_index = ignore_index
 
         self.token_emb = nn.Embedding(num_tokens, dim)
+
+        self.post_token_emb_norm = RMSNorm(dim)
 
         should_compress = compress_factor > 1
 
@@ -284,12 +330,16 @@ class HierarchicalTransformer(nn.Module):
 
         self.layers = mlist([])
 
-        self.rotary_emb = RotaryEmbedding(dim_head)
+        local_attn = partial(LocalMHA, causal = True, prenorm = True)
 
         for _ in range(depth):
+
             self.layers.append(mlist([
-                Attention(dim = dim, dim_head = dim_head, heads = heads, use_flash_attn = use_flash_attn),
-                FeedForward(dim = dim, mult = ff_mult)
+                local_attn(dim = dim, dim_head = dim_head, heads = heads, window_size = hierarchical_window_size),
+                FeedForward(dim = dim, mult = ff_mult),
+                local_attn(dim = dim, dim_head = dim_head, heads = heads, window_size = fine_window_size),
+                FeedForward(dim = dim, mult = ff_mult),
+                HierarchicalMerge(dim = dim)
             ]))
 
         self.norm = RMSNorm(dim)
@@ -353,38 +403,45 @@ class HierarchicalTransformer(nn.Module):
         x = self.token_emb(ids)
         x, orig_seq_len = pad_seq_to_multiple(x, c)
 
+        # post embedding norm
+
+        x = self.post_token_emb_norm(x)
+
         # compress to hierarchical tokens from the beginning
 
         h = x
         if exists(self.compress):
             h, uncompressed = self.compress(x)
 
-        # rotary positional embeddings
-
-        pos_emb = self.rotary_emb(h.shape[-2] // c)
-
         # layers
 
-        for attn, ff in self.layers:
+        for h_local_attn, h_ff, local_attn, ff, h_merge in self.layers:
+
             if should_compress:
                 h = rearrange(h, 'b (n c) d -> (b c) n d', c = c)
 
-            h = attn(h, rotary_emb = pos_emb) + h
+            h = h_local_attn(h) + h
 
             if should_compress:
                 h = rearrange(h, '(b c) n d -> b (n c) d', c = c)
 
-            h = ff(token_shift(h)) + h
+            h = h_ff(token_shift(h)) + h
+
+            x = local_attn(x) + x
+            x = ff(token_shift(x)) + x
+
+            x = h_merge(x, h) + x
 
         # get back the original sequence length
 
+        x = x[:, :orig_seq_len]
         h = h[:, :orig_seq_len]
 
         # final norm and logits
 
-        h = self.norm(h)
+        x = self.norm(x)
 
-        logits = self.to_logits(h)
+        logits = self.to_logits(x)
 
         if not return_loss:
             return logits
