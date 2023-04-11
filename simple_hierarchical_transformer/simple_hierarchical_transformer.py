@@ -395,7 +395,7 @@ class HierarchicalTransformer(nn.Module):
 
         recon_loss = torch.zeros((), device = self.device)
         if should_compress:
-            recon_logits = self.to_recon(x)
+            recon_logits = self.to_recon(h)
             recon_logits = rearrange(recon_logits, 'b n (c d) -> (b c) d n', c = c)
 
             recon_ids = F.pad(ids, (c - 1, 0), value = 0)
