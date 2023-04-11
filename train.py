@@ -13,14 +13,14 @@ from simple_hierarchical_transformer import HierarchicalTransformer
 # constants
 
 NUM_BATCHES = int(1e5)
-BATCH_SIZE = 4
-GRADIENT_ACCUMULATE_EVERY = 4
+BATCH_SIZE = 2
+GRADIENT_ACCUMULATE_EVERY = 8
 LEARNING_RATE = 1e-4
 VALIDATE_EVERY = 100
 PRIME_LENGTH = 128
 GENERATE_EVERY = 500
-GENERATE_LENGTH = 512
-SEQ_LEN = 512
+SEQ_LEN = 4096
+GENERATE_LENGTH = 1024
 
 # helpers
 
@@ -39,10 +39,11 @@ def decode_tokens(tokens):
 
 model = HierarchicalTransformer(
     num_tokens = 256,
-    dim = 512,
+    dim = 1024,
     depth = 8,
     seq_len = SEQ_LEN,
-    use_flash_attn = True
+    use_flash_attn = True,
+    compress_factor = 8
 ).cuda()
 
 # prepare enwik8 data
@@ -81,10 +82,10 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
     model.train()
 
     for _ in range(GRADIENT_ACCUMULATE_EVERY):
-        loss = model(next(train_loader), return_loss = True)
+        loss, (ce_loss, recon_loss) = model(next(train_loader), return_loss = True)
         loss.backward(loss / GRADIENT_ACCUMULATE_EVERY)
 
-    print(f"training loss: {loss.item()}")
+    print(f"training loss: {ce_loss.item()}")
     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
     optim.step()
@@ -93,8 +94,8 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
     if i % VALIDATE_EVERY == 0:
         model.eval()
         with torch.no_grad():
-            loss = model(next(val_loader), return_loss = True)
-            print(f"validation loss: {loss.item()}")
+            loss, (ce_loss, recon_loss) = model(next(val_loader), return_loss = True)
+            print(f"validation loss: {ce_loss.item()}")
 
     if i % GENERATE_EVERY == 0:
         model.eval()
