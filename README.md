@@ -12,8 +12,8 @@ Update: I think it is working 🤞
 
 - [x] branch out to two parallel paths, one for hierarchical tokens, other for plain fine tokens.
 - [x] show that local attention in fine + hierarchical tokens can come close to full attention baseline
+- [x] simple dsconv seems enough to merge for 1 hierarchy
 
-- [ ] try naive projection + GLU for extracting information from hierarchical tokens to fine
 - [ ] try a few types of attention across hierarchies. full self attention, directional, or even token shift and feedforward
 - [ ] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
 - [ ] play around with an autoregressive loss on the hierarchy tokens, using a sigmoid contrastive loss from recent brain paper - can also try random projections + vq, as was done in universal speech model paper, also from brain
