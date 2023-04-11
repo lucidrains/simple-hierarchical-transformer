@@ -156,11 +156,14 @@ class CausalConv(nn.Module):
 class Compress(nn.Module):
     def __init__(
         self,
+        *,
         dim,
+        num_tokens,
         compress_factor = 2,
         expansion_factor = 4,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        ignore_index = 0
     ):
         super().__init__()
         assert compress_factor > 1 and is_power_of_two(compress_factor)
@@ -176,17 +179,26 @@ class Compress(nn.Module):
             Rearrange('b d n -> b n d')
         )
 
+        self.to_recon = Linear(dim, compress_factor * num_tokens)
+        self. ignore_index = ignore_index
+
+    def recon(self, h, ids):
+        c = self.compress_factor
+        seq_len = ids.shape[-1]
+
+        recon_logits = self.to_recon(h)
+        recon_logits = rearrange(recon_logits, 'b n (c d) -> (b c) d n', c = c)
+
+        recon_ids = F.pad(ids, (c - 1, 0), value = 0)
+        recon_ids = tuple(recon_ids[:, i:(seq_len + i)] for i in range(c))
+        recon_ids = torch.stack(recon_ids, dim = 1)
+        recon_ids = rearrange(recon_ids, 'b c n -> (b c) n')
+
+        recon_loss = F.cross_entropy(recon_logits, recon_ids, ignore_index = self.ignore_index)
+        return recon_loss
+
     def forward(self, x):
-        batch, factor = x.shape[0], self.compress_factor
-
-        pooled = self.compress_fn(x)
-
-        x = rearrange(x, 'b n d -> b d n 1')
-        x = F.pad(x, (0, 0, factor - 1, 0), value = 0.)
-        unfolded = F.unfold(x, (factor, 1))
-        unfolded = rearrange(unfolded, 'b (d c) n -> (b n) c d', c = factor)
-
-        return pooled, unfolded
+        return self.compress_fn(x)
 
 class HierarchicalMerge(nn.Module):
     def __init__(
@@ -360,8 +372,10 @@ class HierarchicalTransformer(nn.Module):
 
         if should_compress:
             self.compress = Compress(
-                dim,
-                compress_factor = compress_factor
+                dim = dim,
+                compress_factor = compress_factor,
+                num_tokens = num_tokens,
+                ignore_index = ignore_index
             )
 
         self.recon_loss_weight = recon_loss_weight
@@ -381,9 +395,9 @@ class HierarchicalTransformer(nn.Module):
             ]))
 
         self.norm = RMSNorm(dim)
+        self.hierarchical_norm = RMSNorm(dim)
 
         self.to_logits = Linear(dim, num_tokens)
-        self.to_recon = Linear(dim, compress_factor * num_tokens) if should_compress else None
 
     @torch.no_grad()
     @eval_decorator
@@ -436,8 +450,6 @@ class HierarchicalTransformer(nn.Module):
         if return_loss:
             ids, labels = ids[:, :-1], ids[:, 1:]
 
-        seq_len = ids.shape[-1]
-
         # get token embeddings, and pad to multiple of compression factor
 
         x = self.token_emb(ids)
@@ -450,7 +462,7 @@ class HierarchicalTransformer(nn.Module):
 
         h = x
         if exists(self.compress):
-            h, uncompressed = self.compress(x)
+            h = self.compress(x)
 
         # layers
 
@@ -467,29 +479,20 @@ class HierarchicalTransformer(nn.Module):
         # final norm and logits
 
         x = self.norm(x)
+        h = self.hierarchical_norm(h)
 
         logits = self.to_logits(x)
 
         if not return_loss:
             return logits
 
-        ce = partial(F.cross_entropy, ignore_index = self.ignore_index)
-
         # reconstruction losses for hierarchy tokens -> may remove if see no benefit, which seems to be leaning that way
 
         recon_loss = torch.zeros((), device = self.device)
-        if should_compress:
-            recon_logits = self.to_recon(h)
-            recon_logits = rearrange(recon_logits, 'b n (c d) -> (b c) d n', c = c)
-
-            recon_ids = F.pad(ids, (c - 1, 0), value = 0)
-            recon_ids = tuple(recon_ids[:, i:(seq_len + i)] for i in range(c))
-            recon_ids = torch.stack(recon_ids, dim = 1)
-            recon_ids = rearrange(recon_ids, 'b c n -> (b c) n')
-            recon_loss = ce(recon_logits, recon_ids)
+        recon_loss = recon_loss + self.compress.recon(h, ids)
 
         logits = rearrange(logits, 'b n c -> b c n')
-        ce_loss = ce(logits, labels)
+        ce_loss = F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
 
         total_loss = ce_loss + recon_loss * self.recon_loss_weight
         return total_loss, (ce_loss, recon_loss)
