@@ -23,6 +23,8 @@ Update: I think it is working 🤞
 - [ ] build out simple local attention block, for use across all hierarchies
 - [ ] add flash attention to local attention library
 - [ ] figure out if attention can be shared across hierarchies
+- [ ] add prophet losses for hierarchical tokens
+- [ ] figure out effects of just pooling all fine + hierarchical tokens before cross entropy loss
 
 ## Appreciation
 
