@@ -18,6 +18,7 @@ Update: I think it is working 🤞
 - [ ] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
 - [ ] play around with an autoregressive loss on the hierarchy tokens, using a sigmoid contrastive loss from recent brain paper - can also try random projections + vq, as was done in universal speech model paper, also from brain
 - [ ] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first
+- [ ] make feedforward efficient too with <a href="https://github.com/lucidrains/CoLT5-attention">routing</a>
 
 ## Appreciation
 
