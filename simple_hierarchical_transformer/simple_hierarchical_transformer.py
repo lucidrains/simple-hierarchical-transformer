@@ -287,6 +287,44 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
+class HierarchicalAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8,
+        window_size = None,
+        compress_factor = 2
+    ):
+        super().__init__()
+        assert compress_factor > 1 and is_power_of_two(compress_factor)
+        self.compress_factor = compress_factor
+
+        attn_klass = Attention
+        if exists(window_size):
+            attn_klass = partial(LocalMHA, window_size = window_size, causal = True, prenorm = True)
+
+        self.attn = attn_klass(dim = dim, dim_head = dim_head, heads = heads)
+
+    def forward(self, x):
+        c = self.compress_factor
+        x, orig_seq_len = pad_seq_to_multiple(x, c)
+
+        # hierarchical attention is performed with a simple axial attention
+
+        # this, and using a convolution for compressing at the beginning
+        # is one of the improvements on top of hourglass transformer
+        # the downside is that the savings are only O(c) instead of O(c ** 2)
+        # but this should provide better learning per-token
+
+        x = rearrange(x, 'b (n c) d -> (b c) n d', c = c)
+
+        x = self.attn(x)
+
+        x = rearrange(x, '(b c) n d -> b (n c) d', c = c)
+
+        return x[:, :orig_seq_len]
+
 class HierarchicalTransformer(nn.Module):
     def __init__(
         self,
@@ -335,7 +373,7 @@ class HierarchicalTransformer(nn.Module):
         for _ in range(depth):
 
             self.layers.append(mlist([
-                local_attn(dim = dim, dim_head = dim_head, heads = heads, window_size = hierarchical_window_size),
+                HierarchicalAttention(dim = dim, dim_head = dim_head, heads = heads, window_size = hierarchical_window_size, compress_factor = compress_factor),
                 FeedForward(dim = dim, mult = ff_mult),
                 local_attn(dim = dim, dim_head = dim_head, heads = heads, window_size = fine_window_size),
                 FeedForward(dim = dim, mult = ff_mult),
@@ -398,10 +436,11 @@ class HierarchicalTransformer(nn.Module):
         if return_loss:
             ids, labels = ids[:, :-1], ids[:, 1:]
 
+        seq_len = ids.shape[-1]
+
         # get token embeddings, and pad to multiple of compression factor
 
         x = self.token_emb(ids)
-        x, orig_seq_len = pad_seq_to_multiple(x, c)
 
         # post embedding norm
 
@@ -417,25 +456,13 @@ class HierarchicalTransformer(nn.Module):
 
         for h_local_attn, h_ff, local_attn, ff, h_merge in self.layers:
 
-            if should_compress:
-                h = rearrange(h, 'b (n c) d -> (b c) n d', c = c)
-
             h = h_local_attn(h) + h
-
-            if should_compress:
-                h = rearrange(h, '(b c) n d -> b (n c) d', c = c)
-
             h = h_ff(token_shift(h)) + h
 
             x = local_attn(x) + x
             x = ff(token_shift(x)) + x
 
             x = h_merge(x, h) + x
-
-        # get back the original sequence length
-
-        x = x[:, :orig_seq_len]
-        h = h[:, :orig_seq_len]
 
         # final norm and logits
 
@@ -456,7 +483,7 @@ class HierarchicalTransformer(nn.Module):
             recon_logits = rearrange(recon_logits, 'b n (c d) -> (b c) d n', c = c)
 
             recon_ids = F.pad(ids, (c - 1, 0), value = 0)
-            recon_ids = tuple(recon_ids[:, i:(orig_seq_len + i)] for i in range(c))
+            recon_ids = tuple(recon_ids[:, i:(seq_len + i)] for i in range(c))
             recon_ids = torch.stack(recon_ids, dim = 1)
             recon_ids = rearrange(recon_ids, 'b c n -> (b c) n')
             recon_loss = ce(recon_logits, recon_ids)
