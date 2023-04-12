@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'simple-hierarchical-transformer',
   packages = find_packages(exclude=[]),
-  version = '0.0.16',
+  version = '0.0.17',
   license='MIT',
   description = 'Simple Hierarchical Transformer',
   author = 'Phil Wang',

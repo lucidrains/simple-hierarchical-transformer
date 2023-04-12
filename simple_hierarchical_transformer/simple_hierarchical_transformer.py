@@ -1,5 +1,6 @@
 import math
 from functools import partial
+from itertools import zip_longest
 
 import torch
 import torch.nn.functional as F
@@ -511,7 +512,9 @@ class HierarchicalTransformer(nn.Module):
         self.layers = mlist([])
 
         self.dims = dims
+
         self.hierarchical_merges = mlist([])
+        self.need_hierarchical_merge = num_hierarchies > 1
 
         local_attn = partial(LocalMHA, causal = True, prenorm = True)
 
@@ -547,6 +550,9 @@ class HierarchicalTransformer(nn.Module):
 
             # for merging the information across hierarchies
             # for now, only one direction, from all hierarchies to the hierarchy that is being used to make predictions on, set by predict_hierarchy_index above
+
+            if not self.need_hierarchical_merge:
+                continue
 
             merge = HierarchicalMerge(
                 dims = dims,
@@ -647,14 +653,14 @@ class HierarchicalTransformer(nn.Module):
 
         # layers
 
-        for layer, merge in zip(self.layers, self.hierarchical_merges):
+        for layer, merge in zip_longest(self.layers, self.hierarchical_merges):
 
             tokens = [block(h) for block, h in zip(layer, tokens)]
 
             # pool the information all hierarchies
             # and then update the tokens that will be used to make the final autoregressive prediction
 
-            if ablate_hierarchical_merge:
+            if not self.need_hierarchical_merge or ablate_hierarchical_merge:
                 continue
 
             pooled = merge(tokens)
