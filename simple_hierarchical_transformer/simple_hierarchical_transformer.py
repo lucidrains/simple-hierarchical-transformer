@@ -10,6 +10,7 @@ from einops.layers.torch import Rearrange
 
 from simple_hierarchical_transformer.attention import Attend
 
+from typing import Tuple
 from local_attention import LocalMHA
 
 # constants
@@ -166,6 +167,7 @@ class Compress(nn.Module):
         self,
         *,
         dim,
+        dim_out,
         num_tokens,
         compress_factor = 2,
         expansion_factor = 4,
@@ -180,7 +182,7 @@ class Compress(nn.Module):
         self.compress_factor = compress_factor
 
         if self.no_compress:
-            self.compress_fn = nn.Identity()
+            self.compress_fn = Linear(dim, dim_out) if dim != dim_out else nn.Identity()
             return
 
         dim_inner = int(dim * expansion_factor)
@@ -189,11 +191,11 @@ class Compress(nn.Module):
             Rearrange('b n d -> b d n'),
             CausalConv(dim, dim_inner, compress_factor),
             nn.SiLU(),
-            nn.Conv1d(dim_inner, dim, 1),
+            nn.Conv1d(dim_inner, dim_out, 1),
             Rearrange('b d n -> b n d')
         )
 
-        self.to_recon = Linear(dim, compress_factor * num_tokens)
+        self.to_recon = Linear(dim_out, compress_factor * num_tokens)
         self.ignore_index = ignore_index
 
     def recon(self, h, ids):
@@ -221,24 +223,21 @@ class Compress(nn.Module):
 class HierarchicalMerge(nn.Module):
     def __init__(
         self,
-        dim,
-        num_hierarchies = 2
+        dims: Tuple[int, ...],
+        dim_out
     ):
         super().__init__()
-        dim_in = dim * num_hierarchies
-        self.norm = RMSNorm(dim_in)
+        dim = sum(dims)
 
-        # simple dsconv for now
-
-        self.num_hierarchies = num_hierarchies
         self.net = nn.Sequential(
-            nn.Linear(dim_in, dim * 2),
+            RMSNorm(dim),
+            nn.Linear(dim, dim_out * 2),
             nn.SiLU(),
-            nn.Linear(dim * 2, dim)
+            nn.Linear(dim_out * 2, dim_out)
         )
 
     def forward(self, tokens):
-        x = rearrange(tokens, 'h b n d -> b n (h d)')
+        x = torch.cat(tokens, dim = -1)
         return self.net(x)
 
 # classes
@@ -371,29 +370,48 @@ class HierarchicalTransformer(nn.Module):
         super().__init__()
         self.seq_len = seq_len
 
-        self.token_emb = nn.Embedding(num_tokens, dim)
-        self.post_token_emb_norm = RMSNorm(dim)
-
-        hierarchies = tuple(sorted(cast_tuple(hierarchies)))
+        hierarchies = cast_tuple(hierarchies)
 
         assert all_unique(hierarchies), 'hierarchies compression factors must be all unique integers'
         assert all([*map(is_power_of_two, hierarchies)]), 'only powers of two allowed for hierarchies'
 
-        num_hierarchies = len(hierarchies)
-        predict_hierarchy = default(predict_hierarchy, min(hierarchies))
+        # just use a simple tuple list per hyperparameter to customize each hierarchy
 
-        self.predict_hierarchy_index = hierarchies.index(predict_hierarchy)
+        num_hierarchies = len(hierarchies)
+
+        dims = cast_tuple(dim, num_hierarchies)
+        assert len(dims) == num_hierarchies
 
         window_sizes = cast_tuple(window_sizes, num_hierarchies)
-        assert len(window_sizes) == len(hierarchies)
+        assert len(window_sizes) == num_hierarchies
+
+        dim_head = cast_tuple(dim_head, num_hierarchies)
+        assert len(dim_head) == num_hierarchies
+
+        heads = cast_tuple(heads, num_hierarchies)
+        assert len(heads) == num_hierarchies
+
+        ff_mult = cast_tuple(ff_mult, num_hierarchies)
+        assert len(ff_mult) == num_hierarchies
+
+        predict_hierarchy = default(predict_hierarchy, min(hierarchies))
+        self.predict_hierarchy_index = hierarchies.index(predict_hierarchy)
+        hierarchy_predict_dim = dims[self.predict_hierarchy_index]
+
+        # token embedding
+
+        dim_token_emb = max(dims)
+        self.token_emb = nn.Embedding(num_tokens, dim_token_emb)
+        self.post_token_emb_norm = RMSNorm(dim_token_emb)
 
         # hierarchy compressions - 1x just uses the base token_emb weights
 
         self.compressors = mlist([])
 
-        for hierarchy in hierarchies:
+        for dim, hierarchy in zip(dims, hierarchies):
             self.compressors.append(Compress(
-                dim = dim,
+                dim = dim_token_emb,
+                dim_out = dim,
                 num_tokens = num_tokens,
                 compress_factor = hierarchy,
             ))
@@ -410,26 +428,26 @@ class HierarchicalTransformer(nn.Module):
 
             # add a transformer block for each layer in the hierarchy
 
-            for hierarchy, window_size in zip(hierarchies, window_sizes):
+            for hierarchy, h_dim, h_window_size, h_dim_head, h_heads, h_ff_mult in zip(hierarchies, dims, window_sizes, dim_head, heads, ff_mult):
 
                 # make sure the window size never exceeds the effective sequence length
 
                 effective_seq_len = seq_len // hierarchy
 
-                if exists(window_size) and window_size > effective_seq_len:
+                if exists(h_window_size) and h_window_size > effective_seq_len:
                     print(f'window size for hierarchy {hierarchy}x is greater than effective sequence length - setting window size to None (which would use normal full attention)')
-                    window_size = None
+                    h_window_size = None
 
                 # add attention and feedforward
 
                 hierarchical_layer.append(
                     HierarchicalBlock(
-                        dim = dim,
-                        dim_head = dim_head,
-                        heads = heads,
-                        window_size = window_size,
+                        dim = h_dim,
+                        dim_head = h_dim_head,
+                        heads = h_heads,
+                        window_size = h_window_size,
                         compress_factor = hierarchy,
-                        ff_mult = ff_mult
+                        ff_mult = h_ff_mult
                     )
                 )
 
@@ -438,17 +456,20 @@ class HierarchicalTransformer(nn.Module):
             # for merging the information across hierarchies
             # for now, only one direction, from all hierarchies to the hierarchy that is being used to make predictions on, set by predict_hierarchy_index above
 
-            merge = HierarchicalMerge(dim = dim, num_hierarchies = num_hierarchies)
+            merge = HierarchicalMerge(
+                dims = dims,
+                dim_out = hierarchy_predict_dim
+            )
 
             self.hierarchical_merges.append(merge)
 
         # final post-transformer norms, for all hierarchies
 
-        self.norms = mlist([RMSNorm(dim) for _ in range(num_hierarchies)])
+        self.norms = mlist([RMSNorm(dim) for dim in dims])
 
         # to logit, for hierarchy set at predict_hierarchy_index
 
-        self.to_logits = Linear(dim, num_tokens)
+        self.to_logits = Linear(hierarchy_predict_dim, num_tokens)
 
         # training related loss parameters
 
