@@ -225,29 +225,21 @@ class HierarchicalMerge(nn.Module):
         num_hierarchies = 2
     ):
         super().__init__()
-        self.norms = mlist([RMSNorm(dim) for _ in range(num_hierarchies)])
+        dim_in = dim * num_hierarchies
+        self.norm = RMSNorm(dim_in)
 
         # simple dsconv for now
 
         self.num_hierarchies = num_hierarchies
-        self.conv = nn.Conv1d(dim, dim, num_hierarchies, stride = num_hierarchies, groups = dim)
+        self.net = nn.Sequential(
+            nn.Linear(dim_in, dim * 2),
+            nn.SiLU(),
+            nn.Linear(dim * 2, dim)
+        )
 
     def forward(self, tokens):
-        """
-        einops notations:
-        b - batch
-        h - hierarchies
-        n - sequence length
-        d - dimension
-        """
-        nh = self.num_hierarchies
-
-        tokens = [norm(h) for norm, h in zip(self.norms, tokens)]
-
-        x = rearrange(tokens, 'h b n d -> b d (n h)')
-        x = self.conv(x)
-        x = rearrange(x, 'b d n -> b n d')
-        return x
+        x = rearrange(tokens, 'h b n d -> b n (h d)')
+        return self.net(x)
 
 # classes
 
@@ -311,14 +303,15 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
-class HierarchicalAttention(nn.Module):
+class HierarchicalBlock(nn.Module):
     def __init__(
         self,
         dim,
         dim_head = 64,
         heads = 8,
         window_size = None,
-        compress_factor = 1
+        compress_factor = 1,
+        ff_mult = 4
     ):
         super().__init__()
         assert is_power_of_two(compress_factor)
@@ -331,6 +324,8 @@ class HierarchicalAttention(nn.Module):
             attn_klass = partial(LocalMHA, window_size = window_size)
 
         self.attn = attn_klass(dim = dim, dim_head = dim_head, heads = heads)
+
+        self.ff = FeedForward(dim = dim, mult = ff_mult)
 
     def forward(self, x):
         c = self.compress_factor
@@ -346,7 +341,9 @@ class HierarchicalAttention(nn.Module):
         if not self.no_compress:
             x = rearrange(x, 'b (n c) d -> (b c) n d', c = c)
 
-        x = self.attn(x)
+        x = self.attn(token_shift(x)) + x
+
+        x = self.ff(token_shift(x)) + x
 
         if not self.no_compress:
             x = rearrange(x, '(b c) n d -> b (n c) d', c = c)
@@ -425,16 +422,16 @@ class HierarchicalTransformer(nn.Module):
 
                 # add attention and feedforward
 
-                hierarchical_layer.append(mlist([
-                    HierarchicalAttention(
+                hierarchical_layer.append(
+                    HierarchicalBlock(
                         dim = dim,
                         dim_head = dim_head,
                         heads = heads,
                         window_size = window_size,
-                        compress_factor = hierarchy
-                    ),
-                    FeedForward(dim = dim, mult = ff_mult)
-                ]))
+                        compress_factor = hierarchy,
+                        ff_mult = ff_mult
+                    )
+                )
 
             self.layers.append(hierarchical_layer)
 
@@ -528,15 +525,7 @@ class HierarchicalTransformer(nn.Module):
 
         for layer, merge in zip(self.layers, self.hierarchical_merges):
 
-            next_tokens = []
-
-            for (attn, ff), h in zip(layer, tokens):
-                h = attn(h) + h
-                h = ff(token_shift(h)) + h
-
-                next_tokens.append(h)
-
-            tokens = next_tokens
+            tokens = [block(h) for block, h in zip(layer, tokens)]
 
             # pool the information all hierarchies
             # and then update the tokens that will be used to make the final autoregressive prediction
