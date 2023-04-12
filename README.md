@@ -68,6 +68,29 @@ model = HierarchicalTransformer(
 
 ```
 
+Now something more complex and appropriate. Experiments show that as you compress up the hierarchies, you need greater model dimensions for appropriate capacity.
+
+```python
+model = HierarchicalTransformer(
+    num_tokens = 256,
+    dim = (128, 256, 512),
+    depth = 8,
+    seq_len = SEQ_LEN,
+    use_flash_attn = True,
+    ff_mult = (1, 2, 4),
+    dim_head = (16, 32, 64),
+    heads = (2, 4, 8),
+    hierarchies = (1, 2, 4),
+    window_sizes = (16, 32, 64)
+).cuda()
+
+# hierarchies
+# 1x - dim 128 - attention (2 heads, 16 dim, receptive field 16)
+# 2x - dim 256 - attention (4 heads, 32 dim, receptive field 32)
+# 4x - dim 512 - attention (8 heads, 64 dim, receptive field 64)
+
+```
+
 ## Todo
 
 - [x] branch out to two parallel paths, one for hierarchical tokens, other for plain fine tokens.
@@ -76,9 +99,9 @@ model = HierarchicalTransformer(
 - [x] auto-set window size to be half of max sequence length for fine and all hierarchies
 - [x] figure out effects of just pooling all fine + hierarchical tokens before cross entropy loss - not much of a difference
 - [x] complete ability to add any number of hierarchies, and designate which hierarchy will pool the information from the others for prediction
+- [x] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
 
 - [ ] try a few types of attention across hierarchies. full self attention, directional, or even token shift and feedforward
-- [ ] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
 - [ ] play around with an autoregressive loss on the hierarchy tokens, can try with random projections + vq, as was done in universal speech model paper from brain - also try prophet loss
 - [ ] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first
 - [ ] build out simple local attention block, for use across all hierarchies
