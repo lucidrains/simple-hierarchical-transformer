@@ -109,7 +109,8 @@ model = HierarchicalTransformer(
 - [ ] build out simple local attention block, for use across all hierarchies
 - [ ] add flash attention to local attention library
 - [ ] figure out if attention can be shared across hierarchies
-
+- [ ] do a clean wandb report showing 2x compression without much loss for character level enwik8
+- [ ] allow for some layers to only rely on token shift, no attention
 
 ## Citations
 
