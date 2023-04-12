@@ -73,23 +73,23 @@ Now something more complex. Experiments show that as you compress up the hierarc
 ```python
 model = HierarchicalTransformer(
     num_tokens = 256,
-    dim = (128, 256, 512),
+    dim = (128, 256, 512, 1024),
     depth = 8,
     seq_len = 1024,
     use_flash_attn = True,
-    ff_mult = (1, 2, 4),
-    dim_head = (16, 32, 64),
-    heads = (2, 4, 8),
-    hierarchies = (1, 2, 4),
-    hierarchical_stride = (1, 1, 4),  # this would determine the stride when compressing, and when concatting the hierarchical tokens to the fine tokens, the past tokens will be repeated this amount of time. causality is not violated as using the trick from hourglass transformers where sequence is shifted by compression factor - 1
-    window_sizes = (16, 32, 64)
+    ff_mult = (2, 2, 4, 4),
+    dim_head = (16, 32, 64, 64),
+    heads = (2, 4, 8, 8),
+    hierarchies = (1, 2, 4, 16),
+    hierarchical_stride = (1, 1, 1, 8),  # this would determine the stride when compressing, and when concatting the hierarchical tokens to the fine tokens, the past tokens will be repeated this amount of time. causality is not violated as using the trick from hourglass transformers where sequence is shifted by compression factor - 1. recommend sticking with 1 except for highly compressed hierarchies, as it becomes very uncompetitive with baseline and generations look off
+    window_sizes = (16, 32, 64, None)
 ).cuda()
 
 # hierarchies
 # 1x - dim 128 - attention (2 heads, 16 dim, receptive field 16)
 # 2x - dim 256 - attention (4 heads, 32 dim, receptive field 32)
 # 4x - dim 512 - attention (8 heads, 64 dim, receptive field 64)
-
+# 8x - dim 1024 - attention (8 heads, 64 dim, receptive field of all)
 ```
 
 ## Todo

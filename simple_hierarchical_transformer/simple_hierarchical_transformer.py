@@ -391,7 +391,8 @@ class HierarchicalBlock(nn.Module):
 
         # this, and using a convolution for compressing at the beginning
         # is one of the improvements on top of hourglass transformer
-        # the downside is that the savings are only O(c) instead of O(c ** 2)
+        # the downside is that the savings are only O(c) instead of O(c ** 2) as in hourglass transformer
+        # you can get the O(c ** 2) saving by setting the hierarchical stride == c, but you'll see that performance is much worse, as some tokens will have a c - 1 token gap to the last hierarchical token
         # but this should provide better learning per-token
 
         if not self.no_compress:
