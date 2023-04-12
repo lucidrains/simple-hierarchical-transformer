@@ -421,6 +421,7 @@ class HierarchicalTransformer(nn.Module):
         hierarchies = 1,
         window_sizes = None,
         hierarchical_stride = 1,
+        hierarchy_merge_all = False,  # whether to pass the pooled hierarchical information back to all hierarchies or just one doing the prediction
         ignore_index = 0,
         use_flash_attn = False,
         recon_loss_weight = 0.1,
@@ -471,6 +472,8 @@ class HierarchicalTransformer(nn.Module):
         self.predict_hierarchy_index = hierarchies.index(predict_hierarchy)
         hierarchy_predict_dim = dims[self.predict_hierarchy_index]
 
+        self.hierarchy_merge_all = hierarchy_merge_all
+
         # training related loss weights
 
         self.recon_loss_weight = recon_loss_weight
@@ -506,6 +509,8 @@ class HierarchicalTransformer(nn.Module):
         # layers
 
         self.layers = mlist([])
+
+        self.dims = dims
         self.hierarchical_merges = mlist([])
 
         local_attn = partial(LocalMHA, causal = True, prenorm = True)
@@ -545,7 +550,7 @@ class HierarchicalTransformer(nn.Module):
 
             merge = HierarchicalMerge(
                 dims = dims,
-                dim_out = hierarchy_predict_dim,
+                dim_out = hierarchy_predict_dim if not self.hierarchy_merge_all else sum(dims),
                 h_strides = hierarchical_stride
             )
 
@@ -653,9 +658,13 @@ class HierarchicalTransformer(nn.Module):
                 continue
 
             pooled = merge(tokens)
-            predict_tokens = tokens[self.predict_hierarchy_index]
-            predict_tokens = predict_tokens + pooled
-            tokens[self.predict_hierarchy_index] = predict_tokens
+
+            if self.hierarchy_merge_all:
+                tokens = [(t + p[..., ::s, :]) for t, p, s in zip(tokens, pooled.split(self.dims, dim = -1), self.h_strides)]
+            else:
+                predict_tokens = tokens[self.predict_hierarchy_index]
+                predict_tokens = predict_tokens + pooled
+                tokens[self.predict_hierarchy_index] = predict_tokens
 
         # final norm and logits
 
