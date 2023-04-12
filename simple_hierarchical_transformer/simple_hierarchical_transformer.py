@@ -220,7 +220,7 @@ class Compress(nn.Module):
         prophet_logits = self.to_prophet(h)
         prophet_logits = rearrange(prophet_logits, 'b n (c d) -> (b c) d n', c = c)
 
-        prophet_ids = F.pad(ids, (-1, c), value = 0)
+        prophet_ids = F.pad(ids, (-1, c), value = self.ignore_index)
         prophet_ids = tuple(prophet_ids[:, i:(seq_len + i)] for i in range(c))
         prophet_ids = torch.stack(prophet_ids, dim = 1)
         prophet_ids = rearrange(prophet_ids, 'b c n -> (b c) n')
@@ -240,7 +240,7 @@ class Compress(nn.Module):
         recon_logits = self.to_recon(h)
         recon_logits = rearrange(recon_logits, 'b n (c d) -> (b c) d n', c = c)
 
-        recon_ids = F.pad(ids, (c - 1, 0), value = 0)
+        recon_ids = F.pad(ids, (c - 1, 0), value = self.ignore_index)
         recon_ids = tuple(recon_ids[:, i:(seq_len + i)] for i in range(c))
         recon_ids = torch.stack(recon_ids, dim = 1)
         recon_ids = rearrange(recon_ids, 'b c n -> (b c) n')
@@ -396,7 +396,7 @@ class HierarchicalTransformer(nn.Module):
         ignore_index = 0,
         use_flash_attn = False,
         recon_loss_weight = 0.1,
-        prophet_loss_weight = 0.1,
+        prophet_loss_weight = 0.,
         predict_hierarchy = None,
         predict_use_all_hierarchy = False
     ):
