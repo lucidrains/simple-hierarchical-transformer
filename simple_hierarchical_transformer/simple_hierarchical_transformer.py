@@ -517,8 +517,6 @@ class HierarchicalTransformer(nn.Module):
         self.hierarchical_merges = mlist([])
         self.need_hierarchical_merge = num_hierarchies > 1
 
-        local_attn = partial(LocalMHA, causal = True, prenorm = True)
-
         for _ in range(depth):
             hierarchical_layer = mlist([])
 
