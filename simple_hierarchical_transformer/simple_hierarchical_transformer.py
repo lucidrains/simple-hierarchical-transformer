@@ -507,6 +507,8 @@ class HierarchicalTransformer(nn.Module):
         self,
         ids,
         return_loss = False,
+        return_hierarchical_token_embeds = False,
+        return_hierarchical_embeds = False,
         ablate_hierarchical_merge = False
     ):
         """
@@ -542,6 +544,12 @@ class HierarchicalTransformer(nn.Module):
         for compress in self.compressors:
             tokens.append(compress(x))
 
+        # if one wants all the compressed token embeds
+        # just to investigate the space
+
+        if return_hierarchical_token_embeds:
+            return tokens
+
         # layers
 
         for layer, merge in zip(self.layers, self.hierarchical_merges):
@@ -562,6 +570,11 @@ class HierarchicalTransformer(nn.Module):
         # final norm and logits
 
         tokens = [norm(t) for norm, t in zip(self.norms, tokens)]
+
+        # if one wants all the hierarchical embeds
+
+        if return_hierarchical_embeds:
+            return tokens
 
         # select the hierarchical embeddings that will be doing the predicting
 
