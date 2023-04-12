@@ -488,7 +488,8 @@ class HierarchicalTransformer(nn.Module):
     def forward(
         self,
         ids,
-        return_loss = False
+        return_loss = False,
+        ablate_hierarchical_merge = False
     ):
         """
         einops notation:
@@ -539,6 +540,9 @@ class HierarchicalTransformer(nn.Module):
 
             # pool the information all hierarchies
             # and then update the tokens that will be used to make the final autoregressive prediction
+
+            if ablate_hierarchical_merge:
+                continue
 
             pooled = merge(tokens)
             predict_tokens = tokens[self.predict_hierarchy_index]
