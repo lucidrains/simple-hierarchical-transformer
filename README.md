@@ -8,29 +8,83 @@ So far, the idea has passed the litmus test from a research friend. Will bring i
 
 Update: I think it is working 🤞 
 
-## Todo
-
-- [x] branch out to two parallel paths, one for hierarchical tokens, other for plain fine tokens.
-- [x] show that local attention in fine + hierarchical tokens can come close to full attention baseline
-- [x] simple dsconv seems enough to merge for 1 hierarchy
-
-- [ ] try a few types of attention across hierarchies. full self attention, directional, or even token shift and feedforward
-- [ ] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
-- [ ] play around with an autoregressive loss on the hierarchy tokens, using a sigmoid contrastive loss from recent brain paper - can also try random projections + vq, as was done in universal speech model paper, also from brain
-- [ ] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first
-- [ ] make feedforward efficient too with <a href="https://github.com/lucidrains/CoLT5-attention">routing</a>
-- [ ] auto-set window size to be half of max sequence length for fine and all hierarchies
-- [ ] build out simple local attention block, for use across all hierarchies
-- [ ] add flash attention to local attention library
-- [ ] figure out if attention can be shared across hierarchies
-- [ ] add prophet losses for hierarchical tokens
-- [ ] figure out effects of just pooling all fine + hierarchical tokens before cross entropy loss
-
 ## Appreciation
 
 - <a href="https://stability.ai/">StabilityAI</a> for the sponsorship to carry out this independent research
 
 - <a href="https://huggingface.co/">🤗 Huggingface</a> for their accelerate library
+
+## Install
+
+```
+$ pip install simple-hierarchical-transformer
+```
+
+## Usage
+
+Three hierarchies, all servicing predicting the next token
+
+```python
+import torch
+from simple_hierarchical_transformer import HierarchicalTransformer
+
+model = HierarchicalTransformer(
+    num_tokens = 20000,                # number of tokens
+    dim = 512,                         # model dimensions
+    depth = 6,                         # depth
+    dim_head = 64,                     # dimension per attention head
+    heads = 8,                         # attention heads
+    seq_len = 2048,                    # sequence lengths
+    hierarchies = (1, 2, 8),           # hierarchies - here we have 1x (like in a regular transformer), then 2x and 8x compressed hierarchical tokens that undergo their own transformer blocks. information is pooled into one hierarchy at each layer
+    window_sizes = (32, 64, None)      # local attention window sizes - the idea is that the higher hierarchies can pass distant information to the local one. None stands for full receptive field
+)
+
+ids = torch.randint(0, 20000, (1, 2048))
+
+loss, _ = model(ids, return_loss = True)
+loss.backward()
+
+# after much training
+
+logits = model(ids)
+```
+
+By not specifying `hierarchies` and `window_sizes`, you basically default to a regular autoregressive transformer with attention across full sequence length.
+
+```python
+
+# non-hierarchical transformer
+
+model = HierarchicalTransformer(
+    num_tokens = 20000,
+    dim = 512,
+    depth = 8,
+    dim_head = 64,
+    heads = 8,
+    seq_len = 2048,
+    hierarchies = 1,        # implied 1 if not set
+    window_sizes = None     # implied None (full sequence length) if not set
+)
+
+```
+
+## Todo
+
+- [x] branch out to two parallel paths, one for hierarchical tokens, other for plain fine tokens.
+- [x] show that local attention in fine + hierarchical tokens can come close to full attention baseline
+- [x] simple dsconv seems enough to merge for 1 hierarchy
+- [x] auto-set window size to be half of max sequence length for fine and all hierarchies
+- [x] figure out effects of just pooling all fine + hierarchical tokens before cross entropy loss - not much of a difference
+- [x] complete ability to add any number of hierarchies, and designate which hierarchy will pool the information from the others for prediction
+
+- [ ] try a few types of attention across hierarchies. full self attention, directional, or even token shift and feedforward
+- [ ] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
+- [ ] play around with an autoregressive loss on the hierarchy tokens, can try with random projections + vq, as was done in universal speech model paper from brain - also try prophet loss
+- [ ] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first
+- [ ] build out simple local attention block, for use across all hierarchies
+- [ ] add flash attention to local attention library
+- [ ] figure out if attention can be shared across hierarchies
+
 
 ## Citations
 
@@ -88,13 +142,13 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
 
 ```bibtex
 @software{peng_bo_2021_5196578,
-    author       = {PENG Bo},
-    title        = {BlinkDL/RWKV-LM: 0.01},
-    month        = {aug},
-    year         = {2021},
-    publisher    = {Zenodo},
-    version      = {0.01},
-    doi          = {10.5281/zenodo.5196578},
-    url          = {https://doi.org/10.5281/zenodo.5196578}
+    author    = {PENG Bo},
+    title     = {BlinkDL/RWKV-LM: 0.01},
+    month     = {aug},
+    year      = {2021},
+    publisher = {Zenodo},
+    version   = {0.01},
+    doi       = {10.5281/zenodo.5196578},
+    url       = {https://doi.org/10.5281/zenodo.5196578}
 }
 ```

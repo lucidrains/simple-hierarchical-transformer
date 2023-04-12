@@ -19,7 +19,7 @@ LEARNING_RATE = 1e-4
 VALIDATE_EVERY = 100
 PRIME_LENGTH = 128
 GENERATE_EVERY = 500
-SEQ_LEN = 4096
+SEQ_LEN = 2048
 GENERATE_LENGTH = 1024
 
 # helpers
@@ -42,8 +42,9 @@ model = HierarchicalTransformer(
     dim = 1024,
     depth = 8,
     seq_len = SEQ_LEN,
-    use_flash_attn = True,
-    compress_factor = 8
+    hierarchies = (1, 2),
+    window_sizes = (32, 64),
+    use_flash_attn = True
 ).cuda()
 
 # prepare enwik8 data
