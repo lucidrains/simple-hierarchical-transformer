@@ -81,6 +81,7 @@ model = HierarchicalTransformer(
     dim_head = (16, 32, 64),
     heads = (2, 4, 8),
     hierarchies = (1, 2, 4),
+    hierarchical_stride = (1, 1, 4),  # this would determine the stride when compressing, and when concatting the hierarchical tokens to the fine tokens, the past tokens will be repeated this amount of time. causality is not violated as using the trick from hourglass transformers where sequence is shifted by compression factor - 1
     window_sizes = (16, 32, 64)
 ).cuda()
 
@@ -101,10 +102,10 @@ model = HierarchicalTransformer(
 - [x] complete ability to add any number of hierarchies, and designate which hierarchy will pool the information from the others for prediction
 - [x] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
 - [x] add prophet losses for hierarchical branches
+- [x] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first - implemented as `hierarchical_stride`
 
 - [ ] random projections + vq, as was done in universal speech model paper from brain - for hierarchical predictive coding
-- [ ] try a few types of attention across hierarchies. full self attention, directional, or even token shift and feedforward
-- [ ] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first
+- [ ] allow for specifying which hierarchy receives information from the others during merging, maybe design a specialized attention with masking, but need to account fo different model dimensions across hierarchies
 - [ ] build out simple local attention block, for use across all hierarchies
 - [ ] add flash attention to local attention library
 - [ ] figure out if attention can be shared across hierarchies

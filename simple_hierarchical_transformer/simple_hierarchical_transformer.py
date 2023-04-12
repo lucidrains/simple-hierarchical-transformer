@@ -147,16 +147,28 @@ def pad_seq_to_multiple(t, mult):
     t = F.pad(t, (0, 0, 0, remainder), value = 0.)
     return t, seq_len
 
+def hierarchical_cat(tokens, strides: Tuple[int, ...]):
+    assert len(tokens) == len(strides)
+
+    if all([s == 1 for s in strides]):
+        return torch.cat(tokens, dim = -1)
+
+    tokens = [repeat(t, 'b n d -> b (n s) d', s = s) for t, s in zip(tokens, strides)]
+    min_seq_len = min([t.shape[-2] for t in tokens])
+    tokens = [t[..., :min_seq_len, :] for t in tokens]
+    return torch.cat(tokens, dim = -1)
+
 class CausalConv(nn.Module):
     def __init__(
         self,
         dim_in,
         dim_out,
-        kernel_size
+        kernel_size,
+        stride = 1
     ):
         super().__init__()
         self.causal_padding = kernel_size - 1
-        self.conv = nn.Conv1d(dim_in, dim_out, kernel_size)
+        self.conv = nn.Conv1d(dim_in, dim_out, kernel_size, stride = stride)
 
     def forward(self, x):
         x = F.pad(x, (self.causal_padding, 0))
@@ -169,7 +181,8 @@ class Compress(nn.Module):
         dim,
         dim_out,
         num_tokens,
-        compress_factor = 2,
+        stride = 1,
+        compress_factor = 1,
         expansion_factor = 4,
         dim_head = 64,
         heads = 8,
@@ -180,6 +193,7 @@ class Compress(nn.Module):
         super().__init__()
         assert compress_factor > 0 and is_power_of_two(compress_factor)
 
+        self.stride = stride
         self.no_compress = compress_factor == 1
         self.compress_factor = compress_factor
 
@@ -194,7 +208,7 @@ class Compress(nn.Module):
 
         self.compress_fn = nn.Sequential(
             Rearrange('b n d -> b d n'),
-            CausalConv(dim, dim_inner, compress_factor),
+            CausalConv(dim, dim_inner, compress_factor, stride = stride),
             nn.SiLU(),
             nn.Conv1d(dim_inner, dim_out, 1),
             Rearrange('b d n -> b n d')
@@ -225,6 +239,9 @@ class Compress(nn.Module):
         prophet_ids = torch.stack(prophet_ids, dim = 1)
         prophet_ids = rearrange(prophet_ids, 'b c n -> (b c) n')
 
+        if self.stride > 1:
+            prophet_ids = prophet_ids[..., ::self.stride]
+
         prophet_loss = F.cross_entropy(prophet_logits, prophet_ids, ignore_index = self.ignore_index)
         return prophet_loss
 
@@ -245,6 +262,9 @@ class Compress(nn.Module):
         recon_ids = torch.stack(recon_ids, dim = 1)
         recon_ids = rearrange(recon_ids, 'b c n -> (b c) n')
 
+        if self.stride > 1:
+            recon_ids = recon_ids[..., ::self.stride]
+
         recon_loss = F.cross_entropy(recon_logits, recon_ids, ignore_index = self.ignore_index)
         return recon_loss
 
@@ -255,10 +275,16 @@ class HierarchicalMerge(nn.Module):
     def __init__(
         self,
         dims: Tuple[int, ...],
-        dim_out
+        dim_out,
+        h_strides = 1
     ):
         super().__init__()
         dim = sum(dims)
+
+        strides = cast_tuple(h_strides, len(dims))
+        assert len(strides) == len(dims)
+
+        self.strides = strides
 
         self.net = nn.Sequential(
             RMSNorm(dim),
@@ -268,7 +294,7 @@ class HierarchicalMerge(nn.Module):
         )
 
     def forward(self, tokens):
-        x = torch.cat(tokens, dim = -1)
+        x = hierarchical_cat(tokens, self.strides)
         return self.net(x)
 
 # classes
@@ -393,6 +419,7 @@ class HierarchicalTransformer(nn.Module):
         ff_mult = 4,
         hierarchies = 1,
         window_sizes = None,
+        hierarchical_stride = 1,
         ignore_index = 0,
         use_flash_attn = False,
         recon_loss_weight = 0.1,
@@ -427,6 +454,18 @@ class HierarchicalTransformer(nn.Module):
         ff_mult = cast_tuple(ff_mult, num_hierarchies)
         assert len(ff_mult) == num_hierarchies
 
+        hierarchical_stride = cast_tuple(hierarchical_stride, num_hierarchies)
+
+        assert all([*map(is_power_of_two, hierarchical_stride)]), 'all hierarchical strides must be power of two'
+        assert all([s <= h for s, h in zip(hierarchical_stride, hierarchies)]), 'all strides must be less than the compression factor of the hierarchy'
+
+        self.h_strides = hierarchical_stride
+
+        assert len(hierarchical_stride) == num_hierarchies
+
+        # this determines to which hierarchy is everything pooled into for final prediction
+        # however, final next token prediction can also use all hierarchies with `predict_use_all_hierarchy`
+
         predict_hierarchy = default(predict_hierarchy, min(hierarchies))
         self.predict_hierarchy_index = hierarchies.index(predict_hierarchy)
         hierarchy_predict_dim = dims[self.predict_hierarchy_index]
@@ -452,12 +491,13 @@ class HierarchicalTransformer(nn.Module):
 
         self.compressors = mlist([])
 
-        for dim, hierarchy in zip(dims, hierarchies):
+        for dim, hierarchy, stride in zip(dims, hierarchies, hierarchical_stride):
             self.compressors.append(Compress(
                 dim = dim_token_emb,
                 dim_out = dim,
                 num_tokens = num_tokens,
                 compress_factor = hierarchy,
+                stride = stride,
                 should_recon = should_recon,
                 should_prophet = should_prophet
             ))
@@ -504,7 +544,8 @@ class HierarchicalTransformer(nn.Module):
 
             merge = HierarchicalMerge(
                 dims = dims,
-                dim_out = hierarchy_predict_dim
+                dim_out = hierarchy_predict_dim,
+                h_strides = hierarchical_stride
             )
 
             self.hierarchical_merges.append(merge)
@@ -627,7 +668,7 @@ class HierarchicalTransformer(nn.Module):
         # select the hierarchical embeddings that will be doing the predicting
 
         if self.predict_use_all_hierarchy:
-            predict_embed = torch.cat(tokens, dim = -1)
+            predict_embed = hierarchical_cat(tokens, self.h_strides)
         else:
             predict_embed = tokens[self.predict_hierarchy_index]
 
