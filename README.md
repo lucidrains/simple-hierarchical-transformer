@@ -111,6 +111,7 @@ model = HierarchicalTransformer(
 - [ ] figure out if attention can be shared across hierarchies
 - [ ] do a clean wandb report showing 2x compression without much loss for character level enwik8
 - [ ] allow for some layers to only rely on token shift, no attention
+- [ ] try a self attention based compressor for hierarchies 4 or above
 
 ## Citations
 
