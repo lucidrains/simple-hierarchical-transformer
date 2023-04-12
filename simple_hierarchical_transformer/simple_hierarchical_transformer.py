@@ -173,13 +173,18 @@ class Compress(nn.Module):
         expansion_factor = 4,
         dim_head = 64,
         heads = 8,
-        ignore_index = 0
+        ignore_index = 0,
+        should_recon = False,
+        should_prophet = False
     ):
         super().__init__()
         assert compress_factor > 0 and is_power_of_two(compress_factor)
 
         self.no_compress = compress_factor == 1
         self.compress_factor = compress_factor
+
+        self.should_recon = should_recon
+        self.should_prophet = should_prophet
 
         if self.no_compress:
             self.compress_fn = Linear(dim, dim_out) if dim != dim_out else nn.Identity()
@@ -195,10 +200,36 @@ class Compress(nn.Module):
             Rearrange('b d n -> b n d')
         )
 
-        self.to_recon = Linear(dim_out, compress_factor * num_tokens)
+        if should_recon:
+            self.to_recon = Linear(dim_out, compress_factor * num_tokens)
+
+        if should_prophet:
+            self.to_prophet = Linear(dim_out, compress_factor * num_tokens)
+
         self.ignore_index = ignore_index
 
+    def prophet(self, h, ids):
+        assert self.should_prophet
+
+        if self.no_compress:
+            return torch.zeros((), device = h.device).requires_grad_()
+
+        c = self.compress_factor
+        seq_len = ids.shape[-1]
+
+        prophet_logits = self.to_prophet(h)
+        prophet_logits = rearrange(prophet_logits, 'b n (c d) -> (b c) d n', c = c)
+
+        prophet_ids = F.pad(ids, (-1, c), value = 0)
+        prophet_ids = tuple(prophet_ids[:, i:(seq_len + i)] for i in range(c))
+        prophet_ids = torch.stack(prophet_ids, dim = 1)
+        prophet_ids = rearrange(prophet_ids, 'b c n -> (b c) n')
+
+        prophet_loss = F.cross_entropy(prophet_logits, prophet_ids, ignore_index = self.ignore_index)
+        return prophet_loss
+
     def recon(self, h, ids):
+        assert self.should_recon
 
         if self.no_compress:
             return torch.zeros((), device = h.device).requires_grad_()
@@ -361,11 +392,13 @@ class HierarchicalTransformer(nn.Module):
         heads = 8,
         ff_mult = 4,
         hierarchies = 1,
-        predict_hierarchy = None,
         window_sizes = None,
         ignore_index = 0,
+        use_flash_attn = False,
         recon_loss_weight = 0.1,
-        use_flash_attn = False
+        prophet_loss_weight = 0.1,
+        predict_hierarchy = None,
+        predict_use_all_hierarchy = False
     ):
         super().__init__()
         self.seq_len = seq_len
@@ -398,6 +431,17 @@ class HierarchicalTransformer(nn.Module):
         self.predict_hierarchy_index = hierarchies.index(predict_hierarchy)
         hierarchy_predict_dim = dims[self.predict_hierarchy_index]
 
+        # training related loss weights
+
+        self.recon_loss_weight = recon_loss_weight
+        self.prophet_loss_weight = prophet_loss_weight
+
+        should_recon = recon_loss_weight > 0
+        should_prophet = prophet_loss_weight > 0
+
+        self.should_recon = should_recon
+        self.should_prophet = should_prophet
+
         # token embedding
 
         dim_token_emb = max(dims)
@@ -414,6 +458,8 @@ class HierarchicalTransformer(nn.Module):
                 dim_out = dim,
                 num_tokens = num_tokens,
                 compress_factor = hierarchy,
+                should_recon = should_recon,
+                should_prophet = should_prophet
             ))
 
         # layers
@@ -467,14 +513,16 @@ class HierarchicalTransformer(nn.Module):
 
         self.norms = mlist([RMSNorm(dim) for dim in dims])
 
-        # to logit, for hierarchy set at predict_hierarchy_index
+        # to logit, for hierarchy set at predict_hierarchy_index, or all hierarchies
 
-        self.to_logits = Linear(hierarchy_predict_dim, num_tokens)
+        self.predict_use_all_hierarchy = predict_use_all_hierarchy
+        logit_dim_in = sum(dims) if predict_use_all_hierarchy else hierarchy_predict_dim
+
+        self.to_logits = Linear(logit_dim_in, num_tokens)
 
         # training related loss parameters
 
         self.ignore_index = ignore_index
-        self.recon_loss_weight = recon_loss_weight
 
     @torch.no_grad()
     @eval_decorator
@@ -578,7 +626,10 @@ class HierarchicalTransformer(nn.Module):
 
         # select the hierarchical embeddings that will be doing the predicting
 
-        predict_embed = tokens[self.predict_hierarchy_index]
+        if self.predict_use_all_hierarchy:
+            predict_embed = torch.cat(tokens, dim = -1)
+        else:
+            predict_embed = tokens[self.predict_hierarchy_index]
 
         # logits for predicting next token
 
@@ -592,16 +643,24 @@ class HierarchicalTransformer(nn.Module):
         logits = rearrange(logits, 'b n c -> b c n')
         ce_loss = F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
 
-        # reconstruction losses for hierarchy tokens -> may remove if see no benefit, which seems to be leaning that way
+        # reconstruction losses for hierarchy tokens
 
-        recon_losses = 0
+        recon_losses = prophet_losses = torch.zeros((), device = self.device).requires_grad_()
 
-        for compress, t in zip(self.compressors, tokens):
-            recon_loss = compress.recon(t, ids)
-            recon_losses = recon_losses + recon_loss
+        if self.should_recon:
+            for compress, t in zip(self.compressors, tokens):
+                recon_loss = compress.recon(t, ids)
+                recon_losses = recon_losses + recon_loss
+
+        # prophet losses for hierarchy tokens - prophetnet paper -> basically just predict N steps ahead instead of 1
+
+        if self.should_prophet:
+            for compress, t in zip(self.compressors, tokens):
+                prophet_loss = compress.prophet(t, ids)
+                prophet_losses = prophet_losses + prophet_loss
 
         # total loss
 
-        total_loss = ce_loss + recon_loss * self.recon_loss_weight
+        total_loss = ce_loss + recon_losses * self.recon_loss_weight + prophet_losses * self.prophet_loss_weight
 
-        return total_loss, (ce_loss, recon_loss)
+        return total_loss, (ce_loss, recon_losses, prophet_losses)
