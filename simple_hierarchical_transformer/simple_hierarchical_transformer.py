@@ -300,6 +300,14 @@ class HierarchicalMerge(nn.Module):
 
 # classes
 
+class Gamma(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return x * self.gamma
+
 class RMSNorm(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -563,7 +571,9 @@ class HierarchicalTransformer(nn.Module):
 
         # final post-transformer norms, for all hierarchies
 
-        self.norms = mlist([RMSNorm(dim) for dim in dims])
+        self.norms = mlist([nn.LayerNorm(dim, elementwise_affine = False) for dim in dims])
+
+        self.post_norm_gammas = mlist([Gamma(dim) for dim in dims])
 
         # to logit, for hierarchy set at predict_hierarchy_index, or all hierarchies
 
@@ -671,9 +681,16 @@ class HierarchicalTransformer(nn.Module):
                 predict_tokens = predict_tokens + pooled
                 tokens[self.predict_hierarchy_index] = predict_tokens
 
-        # final norm and logits
+        # mean centered with std 1 embeddings
+        # random projections will be applied to this for hierarchical prediction
 
         tokens = [norm(t) for norm, t in zip(self.norms, tokens)]
+
+        normed_embeds = tokens
+
+        # gammas that are needed after norm
+
+        tokens = [gamma(t) for gamma, t in zip(self.post_norm_gammas, tokens)]
 
         # if one wants all the hierarchical embeds
 

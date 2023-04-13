@@ -178,3 +178,12 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
     url       = {https://doi.org/10.5281/zenodo.5196578}
 }
 ```
+
+```bibtex
+@inproceedings{Chiu2022SelfsupervisedLW,
+    title   = {Self-supervised Learning with Random-projection Quantizer for Speech Recognition},
+    author  = {Chung-Cheng Chiu and James Qin and Yu Zhang and Jiahui Yu and Yonghui Wu},
+    booktitle = {International Conference on Machine Learning},
+    year    = {2022}
+}
+```
