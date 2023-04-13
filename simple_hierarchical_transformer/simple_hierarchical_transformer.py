@@ -474,7 +474,7 @@ class HierarchicalTransformer(nn.Module):
         hierarchy_predict_dim = dims[self.predict_hierarchy_index]
 
         self.hierarchy_merge_all = hierarchy_merge_all
-        assert hierarchy_merge_all or self.h_strides[self.predict_hierary_index] == 1, 'the hierarchy level being used for final next token prediction must have compression stride of 1'
+        assert hierarchy_merge_all or self.h_strides[self.predict_hierarchy_index] == 1, 'the hierarchy level being used for final next token prediction must have compression stride of 1'
 
         # training related loss weights
 
