@@ -110,6 +110,7 @@ model = HierarchicalTransformer(
 - [ ] do a clean wandb report showing 2x compression without much loss for character level enwik8
 - [ ] allow for some layers to only rely on token shift, no attention
 - [ ] try a self attention based compressor for hierarchies 4 or above
+- [ ] build a small autoencoder using the token embeddings as input, at the very beginning of the network, and then use intermediate feature maps for each parallel hierarchical network
 
 ## Citations
 
