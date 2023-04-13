@@ -14,6 +14,8 @@ from simple_hierarchical_transformer.attention import Attend
 from typing import Tuple
 from local_attention import LocalMHA
 
+from vector_quantize_pytorch import RandomProjectionQuantizer
+
 # constants
 
 mlist = nn.ModuleList
@@ -436,7 +438,10 @@ class HierarchicalTransformer(nn.Module):
         recon_loss_weight = 0.1,
         prophet_loss_weight = 0.,
         predict_hierarchy = None,
-        predict_use_all_hierarchy = False
+        predict_use_all_hierarchy = False,
+        rq_num_codebooks = 16,
+        rq_codebook_dim = 256,
+        rq_codebook_size = 1024
     ):
         super().__init__()
         self.seq_len = seq_len
@@ -575,6 +580,17 @@ class HierarchicalTransformer(nn.Module):
 
         self.post_norm_gammas = mlist([Gamma(dim) for dim in dims])
 
+        # random projection quantizer, for another approach to hierarchical predictive coding
+
+        rpq_klass = partial(
+            RandomProjectionQuantizer,
+            num_codebooks = rq_num_codebooks,
+            codebook_dim = rq_codebook_dim,
+            codebook_size = rq_codebook_dim
+        )
+
+        self.rand_proj_quantizers = mlist([rpq_klass(dim = dim) for dim in dims])
+
         # to logit, for hierarchy set at predict_hierarchy_index, or all hierarchies
 
         self.predict_use_all_hierarchy = predict_use_all_hierarchy
@@ -619,7 +635,8 @@ class HierarchicalTransformer(nn.Module):
         return_loss = False,
         return_hierarchical_token_embeds = False,
         return_hierarchical_embeds = False,
-        ablate_hierarchical_merge = False
+        ablate_hierarchical_merge = False,
+        return_random_proj_quantize_ids = False
     ):
         """
         einops notation:
@@ -682,11 +699,14 @@ class HierarchicalTransformer(nn.Module):
                 tokens[self.predict_hierarchy_index] = predict_tokens
 
         # mean centered with std 1 embeddings
-        # random projections will be applied to this for hierarchical prediction
 
         tokens = [norm(t) for norm, t in zip(self.norms, tokens)]
 
-        normed_embeds = tokens
+        # random projections will be applied the tokens (normalized embedding without gamma) for hierarchical prediction
+
+        if return_random_proj_quantize_ids:
+            hierarchical_ids = [quantize(t) for quantize, t in zip(self.rand_proj_quantizers, tokens)]
+            return hierarchical_ids
 
         # gammas that are needed after norm
 
