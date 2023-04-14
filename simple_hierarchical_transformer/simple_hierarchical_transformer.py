@@ -220,18 +220,19 @@ class Compress(nn.Module):
 
         if self.no_compress:
             self.compress_fn = Linear(dim, dim_out) if dim != dim_out else nn.Identity()
-        else:
-            dim_inner = int(dim * expansion_factor)
+            return
 
-            self.compress_fn = nn.Sequential(
-                Rearrange('b n d -> b d n'),
-                CausalConv(dim, dim_inner, compress_factor, stride = stride),
-                nn.SiLU(),
-                nn.Conv1d(dim_inner, dim_out, 1),
-                Rearrange('b d n -> b n d')
-            )
+        dim_inner = int(dim * expansion_factor)
 
-        if not self.no_compress and should_recon:
+        self.compress_fn = nn.Sequential(
+            Rearrange('b n d -> b d n'),
+            CausalConv(dim, dim_inner, compress_factor, stride = stride),
+            nn.SiLU(),
+            nn.Conv1d(dim_inner, dim_out, 1),
+            Rearrange('b d n -> b n d')
+        )
+
+        if should_recon:
             assert exists(num_tokens)
             self.to_recon = Linear(dim_out, compress_factor * num_tokens)
 
@@ -315,14 +316,6 @@ class HierarchicalMerge(nn.Module):
         return self.net(x)
 
 # classes
-
-class Gamma(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        return x * self.gamma
 
 class RMSNorm(nn.Module):
     def __init__(self, dim):
@@ -461,6 +454,7 @@ class HierarchicalTransformer(nn.Module):
         recon_loss_weight = 0.1,
         prophet_loss_weight = 0.,
         prophet_loss_use_quantized = False, # for prophet, whether to use the next 1x token ids, or use the ids from random projection quantization
+        prophet_quantized_use_embed = False,
         predict_hierarchy = None,
         predict_use_all_hierarchy = False,
         rq_num_codebooks = 4,
@@ -526,12 +520,12 @@ class HierarchicalTransformer(nn.Module):
         self.should_prophet = should_prophet
 
         self.prophet_loss_use_quantized = prophet_loss_use_quantized
+        self.prophet_quantized_use_embed = prophet_quantized_use_embed
 
         # token embedding
 
         dim_token_emb = max(dims)
         self.token_emb = nn.Embedding(num_tokens, dim_token_emb)
-        self.post_token_emb_norm = RMSNorm(dim_token_emb)
 
         # hierarchy compressions - 1x just uses the base token_emb weights
 
@@ -545,9 +539,13 @@ class HierarchicalTransformer(nn.Module):
                 compress_factor = hierarchy,
                 stride = stride,
                 should_recon = should_recon,
-                should_prophet = should_prophet and (prophet_loss_use_quantized or hierarchy > 1),
+                should_prophet = should_prophet,
                 prophet_num_predictions = ((hierarchy * num_tokens) if not prophet_loss_use_quantized else (rq_num_codebooks * rq_codebook_size))
             ))
+
+        # post token embedding norms
+
+        self.post_token_emb_norms = mlist([nn.LayerNorm(dim) for dim in dims])
 
         # layers
 
@@ -605,9 +603,7 @@ class HierarchicalTransformer(nn.Module):
 
         # final post-transformer norms, for all hierarchies
 
-        self.norms = mlist([nn.LayerNorm(dim, elementwise_affine = False) for dim in dims])
-
-        self.post_norm_gammas = mlist([Gamma(dim) for dim in dims])
+        self.norms = mlist([nn.LayerNorm(dim) for dim in dims])
 
         # random projection quantizer, for another approach to hierarchical predictive coding
 
@@ -690,16 +686,20 @@ class HierarchicalTransformer(nn.Module):
 
         x = self.token_emb(ids)
 
-        # post embedding norm
-
-        x = self.post_token_emb_norm(x)
-
         # for every hierarchy, compress token embeddings appropriately to the hierarchical embeddings
 
         tokens = []
 
         for compress in self.compressors:
             tokens.append(compress(x))
+
+        # save hierarchical tokens right before norm for random projection quantization, if needed
+
+        post_compressed_tokens = tokens
+
+        # post embedding norms
+
+        tokens = apply_fns(self.post_token_emb_norms, tokens)
 
         # if one wants all the compressed token embeds
         # just to investigate the space
@@ -728,19 +728,16 @@ class HierarchicalTransformer(nn.Module):
                 predict_tokens = predict_tokens + pooled
                 tokens[self.predict_hierarchy_index] = predict_tokens
 
-        # mean centered with std 1 embeddings
-
-        normalized_embeds = apply_fns(self.norms, tokens)
-
         # random projections will be applied the tokens (normalized embedding without gamma) for hierarchical prediction
 
         if return_random_proj_quantize_ids:
-            hierarchical_ids = apply_fns(self.rand_proj_quantizers, normalized_embeds)
+            quantize_input = tokens if self.prophet_quantized_use_embed else post_compressed_tokens
+            hierarchical_ids = apply_fns(self.rand_proj_quantizers, quantize_input)
             return hierarchical_ids
 
-        # gammas that are needed after norm
+        # mean centered with std 1 embeddings
 
-        embeds = apply_fns(self.post_norm_gammas, normalized_embeds)
+        embeds = apply_fns(self.norms, tokens)
 
         # if one wants all the hierarchical embeds
 
@@ -781,9 +778,14 @@ class HierarchicalTransformer(nn.Module):
 
         if self.should_prophet:
             if self.prophet_loss_use_quantized:
-                hierarchical_ids = apply_fns(self.rand_proj_quantizers, tokens)
+                quantize_input = tokens if self.prophet_quantized_use_embed else post_compressed_tokens
+
+                hierarchical_ids = apply_fns(self.rand_proj_quantizers, quantize_input)
 
                 for hierarchy, stride, compress, embed, pred_ids in zip(self.hierarchies, self.h_strides, self.compressors, embeds, hierarchical_ids):
+                    if hierarchy == 1:
+                        continue
+
                     prophet_logits = compress.to_prophet(embed)
 
                     mult = hierarchy // stride
