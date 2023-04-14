@@ -102,8 +102,8 @@ model = HierarchicalTransformer(
 - [x] add prophet losses for hierarchical branches
 - [x] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first - implemented as `hierarchical_stride`
 - [x] allow for some layers to only rely on token shift, no attention
+- [x] random projections + vq, as was done in universal speech model paper from brain - for hierarchical predictive coding
 
-- [ ] random projections + vq, as was done in universal speech model paper from brain - for hierarchical predictive coding
 - [ ] allow for specifying which hierarchy receives information from the others during merging, maybe design a specialized attention with masking, but need to account fo different model dimensions across hierarchies
 - [ ] build out simple local attention block, for use across all hierarchies
 - [ ] add flash attention to local attention library

@@ -35,6 +35,9 @@ def is_power_of_two(n):
 def all_unique(arr):
     return len(set(arr)) == len(arr)
 
+def apply_fns(fns, tensors):
+    return [fn(tensor) for fn, tensor in zip(fns, tensors)]
+
 def cast_tuple(t, length = 1):
     return t if isinstance(t, tuple) else ((t,) * length)
 
@@ -150,6 +153,17 @@ def pad_seq_to_multiple(t, mult):
     t = F.pad(t, (0, 0, 0, remainder), value = 0.)
     return t, seq_len
 
+def curtail_seq_to_multiple(t, mult):
+    seq_len = t.shape[-2]
+    prev_seq_len_mult = (seq_len // mult) * mult
+    remainder = seq_len - prev_seq_len_mult
+
+    if remainder == 0:
+        return t
+
+    t = t[..., :prev_seq_len_mult, :]
+    return t
+
 def hierarchical_cat(tokens, strides: Tuple[int, ...]):
     assert len(tokens) == len(strides)
 
@@ -183,7 +197,7 @@ class Compress(nn.Module):
         *,
         dim,
         dim_out,
-        num_tokens,
+        num_tokens = None,
         stride = 1,
         compress_factor = 1,
         expansion_factor = 4,
@@ -191,7 +205,8 @@ class Compress(nn.Module):
         heads = 8,
         ignore_index = 0,
         should_recon = False,
-        should_prophet = False
+        should_prophet = False,
+        prophet_num_predictions = None
     ):
         super().__init__()
         assert compress_factor > 0 and is_power_of_two(compress_factor)
@@ -218,10 +233,12 @@ class Compress(nn.Module):
         )
 
         if should_recon:
+            assert exists(num_tokens)
             self.to_recon = Linear(dim_out, compress_factor * num_tokens)
 
         if should_prophet:
-            self.to_prophet = Linear(dim_out, compress_factor * num_tokens)
+            assert exists(prophet_num_predictions)
+            self.to_prophet = Linear(dim_out, prophet_num_predictions)
 
         self.ignore_index = ignore_index
 
@@ -446,19 +463,21 @@ class HierarchicalTransformer(nn.Module):
         use_flash_attn = False,
         recon_loss_weight = 0.1,
         prophet_loss_weight = 0.,
+        prophet_loss_use_quantized = False, # for prophet, whether to use the next 1x token ids, or use the ids from random projection quantization
         predict_hierarchy = None,
         predict_use_all_hierarchy = False,
-        rq_num_codebooks = 16,
+        rq_num_codebooks = 4,
         rq_codebook_dim = 256,
-        rq_codebook_size = 1024
+        rq_codebook_size = 1024,
     ):
         super().__init__()
         self.seq_len = seq_len
 
         hierarchies = cast_tuple(hierarchies)
-
         assert all_unique(hierarchies), 'hierarchies compression factors must be all unique integers'
         assert all([*map(is_power_of_two, hierarchies)]), 'only powers of two allowed for hierarchies'
+
+        self.hierarchies = hierarchies
 
         # just use a simple tuple list per hyperparameter to customize each hierarchy
 
@@ -509,6 +528,8 @@ class HierarchicalTransformer(nn.Module):
         self.should_recon = should_recon
         self.should_prophet = should_prophet
 
+        self.prophet_loss_use_quantized = prophet_loss_use_quantized
+
         # token embedding
 
         dim_token_emb = max(dims)
@@ -527,7 +548,8 @@ class HierarchicalTransformer(nn.Module):
                 compress_factor = hierarchy,
                 stride = stride,
                 should_recon = should_recon,
-                should_prophet = should_prophet
+                should_prophet = should_prophet,
+                prophet_num_predictions = ((hierarchy * num_tokens) if not prophet_loss_use_quantized else (rq_num_codebooks * rq_codebook_size))
             ))
 
         # layers
@@ -596,10 +618,11 @@ class HierarchicalTransformer(nn.Module):
             RandomProjectionQuantizer,
             num_codebooks = rq_num_codebooks,
             codebook_dim = rq_codebook_dim,
-            codebook_size = rq_codebook_dim
+            codebook_size = rq_codebook_size
         )
 
         self.rand_proj_quantizers = mlist([rpq_klass(dim = dim) for dim in dims])
+        self.rq_num_codebooks = rq_num_codebooks
 
         # to logit, for hierarchy set at predict_hierarchy_index, or all hierarchies
 
@@ -691,7 +714,7 @@ class HierarchicalTransformer(nn.Module):
 
         for layer, merge in zip_longest(self.layers, self.hierarchical_merges):
 
-            tokens = [block(h) for block, h in zip(layer, tokens)]
+            tokens = apply_fns(layer, tokens)
 
             # pool the information all hierarchies
             # and then update the tokens that will be used to make the final autoregressive prediction
@@ -710,29 +733,29 @@ class HierarchicalTransformer(nn.Module):
 
         # mean centered with std 1 embeddings
 
-        tokens = [norm(t) for norm, t in zip(self.norms, tokens)]
+        normalized_embeds = apply_fns(self.norms, tokens)
 
         # random projections will be applied the tokens (normalized embedding without gamma) for hierarchical prediction
 
         if return_random_proj_quantize_ids:
-            hierarchical_ids = [quantize(t) for quantize, t in zip(self.rand_proj_quantizers, tokens)]
+            hierarchical_ids = apply_fns(self.rand_proj_quantizers, normalized_embeds)
             return hierarchical_ids
 
         # gammas that are needed after norm
 
-        tokens = [gamma(t) for gamma, t in zip(self.post_norm_gammas, tokens)]
+        embeds = apply_fns(self.post_norm_gammas, normalized_embeds)
 
         # if one wants all the hierarchical embeds
 
         if return_hierarchical_embeds:
-            return tokens
+            return embeds
 
         # select the hierarchical embeddings that will be doing the predicting
 
         if self.predict_use_all_hierarchy:
-            predict_embed = hierarchical_cat(tokens, self.h_strides)
+            predict_embed = hierarchical_cat(embeds, self.h_strides)
         else:
-            predict_embed = tokens[self.predict_hierarchy_index]
+            predict_embed = embeds[self.predict_hierarchy_index]
 
         # logits for predicting next token
 
@@ -741,26 +764,51 @@ class HierarchicalTransformer(nn.Module):
         if not return_loss:
             return logits
 
+        ce_loss_fn = partial(F.cross_entropy, ignore_index = self.ignore_index)
+
         # autoregressive loss (predictive coding)
 
         logits = rearrange(logits, 'b n c -> b c n')
-        ce_loss = F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
+        ce_loss = ce_loss_fn(logits, labels)
 
         # reconstruction losses for hierarchy tokens
 
         recon_losses = prophet_losses = torch.zeros((), device = self.device).requires_grad_()
 
         if self.should_recon:
-            for compress, t in zip(self.compressors, tokens):
+            for compress, t in zip(self.compressors, embeds):
                 recon_loss = compress.recon(t, ids)
                 recon_losses = recon_losses + recon_loss
 
         # prophet losses for hierarchy tokens - prophetnet paper -> basically just predict N steps ahead instead of 1
 
         if self.should_prophet:
-            for compress, t in zip(self.compressors, tokens):
-                prophet_loss = compress.prophet(t, ids)
-                prophet_losses = prophet_losses + prophet_loss
+            if self.prophet_loss_use_quantized:
+                hierarchical_ids = apply_fns(self.rand_proj_quantizers, tokens)
+
+                for hierarchy, stride, compress, embed, pred_ids in zip(self.hierarchies, self.h_strides, self.compressors, embeds, hierarchical_ids):
+                    if hierarchy == 1:
+                        continue
+
+                    prophet_logits = compress.to_prophet(embed)
+
+                    mult = hierarchy // stride
+
+                    prophet_logits = curtail_seq_to_multiple(prophet_logits, mult)
+                    pred_ids = curtail_seq_to_multiple(pred_ids, mult)
+
+                    prophet_logits, pred_ids = map(lambda t: rearrange(t, 'b (n c) ... -> (b c) n ...', c = mult), (prophet_logits, pred_ids))
+
+                    prophet_logits = rearrange(prophet_logits[:, :-1], 'b n (q c) -> (b q) c n', q = self.rq_num_codebooks)
+                    pred_ids = rearrange(pred_ids[:, 1:], 'b n q -> (b q) n')
+
+                    prophet_loss = ce_loss_fn(prophet_logits, pred_ids)
+                    prophet_losses = prophet_losses + prophet_loss
+
+            else:
+                for compress, t in zip(self.compressors, embeds):
+                    prophet_loss = compress.prophet(t, ids)
+                    prophet_losses = prophet_losses + prophet_loss
 
         # total loss
 
