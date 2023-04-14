@@ -34,7 +34,7 @@ model = HierarchicalTransformer(
     heads = 8,                         # attention heads
     seq_len = 2048,                    # sequence lengths
     hierarchies = (1, 2, 8),           # hierarchies - here we have 1x (like in a regular transformer), then 2x and 8x compressed hierarchical tokens that undergo their own transformer blocks. information is pooled into one hierarchy at each layer
-    window_sizes = (32, 64, None)      # local attention window sizes - the idea is that the higher hierarchies can pass distant information to the local one. None stands for full receptive field
+    window_sizes = (32, 64, None)      # local attention window sizes - the idea is that the higher hierarchies can pass distant information to the local one. None stands for full receptive field. Setting 0 would turn off attention at this hierarchy altogether (while token shift will still be in effect in each layer)
 )
 
 ids = torch.randint(0, 20000, (1, 2048))
@@ -101,6 +101,7 @@ model = HierarchicalTransformer(
 - [x] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
 - [x] add prophet losses for hierarchical branches
 - [x] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first - implemented as `hierarchical_stride`
+- [x] allow for some layers to only rely on token shift, no attention
 
 - [ ] random projections + vq, as was done in universal speech model paper from brain - for hierarchical predictive coding
 - [ ] allow for specifying which hierarchy receives information from the others during merging, maybe design a specialized attention with masking, but need to account fo different model dimensions across hierarchies
@@ -108,7 +109,6 @@ model = HierarchicalTransformer(
 - [ ] add flash attention to local attention library
 - [ ] figure out if attention can be shared across hierarchies
 - [ ] do a clean wandb report showing 2x compression without much loss for character level enwik8
-- [ ] allow for some layers to only rely on token shift, no attention
 - [ ] try a self attention based compressor for hierarchies 4 or above
 - [ ] build a small autoencoder using the token embeddings as input, at the very beginning of the network, and then use intermediate feature maps for each parallel hierarchical network
 

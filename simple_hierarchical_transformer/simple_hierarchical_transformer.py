@@ -382,17 +382,23 @@ class HierarchicalBlock(nn.Module):
         ff_mult = 4
     ):
         super().__init__()
-        assert is_power_of_two(compress_factor)
         self.stride = stride
+
+        assert is_power_of_two(compress_factor)
         self.compress_factor = compress_factor
         self.no_compress = compress_factor == 1
 
-        attn_klass = Attention
+        assert not exists(window_size) or window_size >= 0
+        self.has_attn = window_size != 0
 
-        if exists(window_size):
-            attn_klass = partial(LocalMHA, window_size = window_size)
+        self.attn = None
 
-        self.attn = attn_klass(dim = dim, dim_head = dim_head, heads = heads)
+        if self.has_attn:
+            attn_klass = Attention
+            if exists(window_size):
+                attn_klass = partial(LocalMHA, window_size = window_size)
+
+            self.attn = attn_klass(dim = dim, dim_head = dim_head, heads = heads)
 
         self.ff = FeedForward(dim = dim, mult = ff_mult)
 
@@ -411,7 +417,8 @@ class HierarchicalBlock(nn.Module):
         if not self.no_compress:
             x = rearrange(x, 'b (n c) d -> (b c) n d', c = c // self.stride)
 
-        x = self.attn(token_shift(x)) + x
+        if exists(self.attn):
+            x = self.attn(token_shift(x)) + x
 
         x = self.ff(token_shift(x)) + x
 
