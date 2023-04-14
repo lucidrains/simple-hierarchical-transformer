@@ -378,10 +378,12 @@ class HierarchicalBlock(nn.Module):
         heads = 8,
         window_size = None,
         compress_factor = 1,
+        stride = 1,
         ff_mult = 4
     ):
         super().__init__()
         assert is_power_of_two(compress_factor)
+        self.stride = stride
         self.compress_factor = compress_factor
         self.no_compress = compress_factor == 1
 
@@ -407,14 +409,14 @@ class HierarchicalBlock(nn.Module):
         # but this should provide better learning per-token
 
         if not self.no_compress:
-            x = rearrange(x, 'b (n c) d -> (b c) n d', c = c)
+            x = rearrange(x, 'b (n c) d -> (b c) n d', c = c // self.stride)
 
         x = self.attn(token_shift(x)) + x
 
         x = self.ff(token_shift(x)) + x
 
         if not self.no_compress:
-            x = rearrange(x, '(b c) n d -> b (n c) d', c = c)
+            x = rearrange(x, '(b c) n d -> b (n c) d', c = c // self.stride)
 
         return x[:, :orig_seq_len]
 
@@ -535,7 +537,7 @@ class HierarchicalTransformer(nn.Module):
 
             # add a transformer block for each layer in the hierarchy
 
-            for hierarchy, h_dim, h_window_size, h_dim_head, h_heads, h_ff_mult in zip(hierarchies, dims, window_sizes, dim_head, heads, ff_mult):
+            for hierarchy, h_stride, h_dim, h_window_size, h_dim_head, h_heads, h_ff_mult in zip(hierarchies, hierarchical_stride, dims, window_sizes, dim_head, heads, ff_mult):
 
                 # make sure the window size never exceeds the effective sequence length
 
@@ -554,6 +556,7 @@ class HierarchicalTransformer(nn.Module):
                         heads = h_heads,
                         window_size = h_window_size,
                         compress_factor = hierarchy,
+                        stride = h_stride,
                         ff_mult = h_ff_mult
                     )
                 )
