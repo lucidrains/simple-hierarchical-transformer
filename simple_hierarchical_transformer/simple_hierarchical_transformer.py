@@ -220,19 +220,18 @@ class Compress(nn.Module):
 
         if self.no_compress:
             self.compress_fn = Linear(dim, dim_out) if dim != dim_out else nn.Identity()
-            return
+        else:
+            dim_inner = int(dim * expansion_factor)
 
-        dim_inner = int(dim * expansion_factor)
+            self.compress_fn = nn.Sequential(
+                Rearrange('b n d -> b d n'),
+                CausalConv(dim, dim_inner, compress_factor, stride = stride),
+                nn.SiLU(),
+                nn.Conv1d(dim_inner, dim_out, 1),
+                Rearrange('b d n -> b n d')
+            )
 
-        self.compress_fn = nn.Sequential(
-            Rearrange('b n d -> b d n'),
-            CausalConv(dim, dim_inner, compress_factor, stride = stride),
-            nn.SiLU(),
-            nn.Conv1d(dim_inner, dim_out, 1),
-            Rearrange('b d n -> b n d')
-        )
-
-        if should_recon:
+        if not self.no_compress and should_recon:
             assert exists(num_tokens)
             self.to_recon = Linear(dim_out, compress_factor * num_tokens)
 
@@ -787,9 +786,6 @@ class HierarchicalTransformer(nn.Module):
                 hierarchical_ids = apply_fns(self.rand_proj_quantizers, tokens)
 
                 for hierarchy, stride, compress, embed, pred_ids in zip(self.hierarchies, self.h_strides, self.compressors, embeds, hierarchical_ids):
-                    if hierarchy == 1:
-                        continue
-
                     prophet_logits = compress.to_prophet(embed)
 
                     mult = hierarchy // stride
