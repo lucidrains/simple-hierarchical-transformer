@@ -242,9 +242,7 @@ class Compress(nn.Module):
         self.ignore_index = ignore_index
 
     def prophet(self, h, ids):
-        assert self.should_prophet
-
-        if self.no_compress:
+        if not self.should_prophet:
             return torch.zeros((), device = h.device).requires_grad_()
 
         c = self.compress_factor
@@ -547,7 +545,7 @@ class HierarchicalTransformer(nn.Module):
                 compress_factor = hierarchy,
                 stride = stride,
                 should_recon = should_recon,
-                should_prophet = should_prophet,
+                should_prophet = should_prophet and (prophet_loss_use_quantized or hierarchy > 1),
                 prophet_num_predictions = ((hierarchy * num_tokens) if not prophet_loss_use_quantized else (rq_num_codebooks * rq_codebook_size))
             ))
 
