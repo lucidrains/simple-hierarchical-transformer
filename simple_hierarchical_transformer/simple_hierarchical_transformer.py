@@ -411,7 +411,9 @@ class HierarchicalBlock(nn.Module):
 
     def forward(self, x):
         c = self.compress_factor
-        x, orig_seq_len = pad_seq_to_multiple(x, c)
+        axial_dim = c // self.stride
+
+        x, orig_seq_len = pad_seq_to_multiple(x, axial_dim)
 
         # hierarchical attention is performed with a simple axial attention
 
@@ -419,10 +421,9 @@ class HierarchicalBlock(nn.Module):
         # is one of the improvements on top of hourglass transformer
         # the downside is that the savings are only O(c) instead of O(c ** 2) as in hourglass transformer
         # you can get the O(c ** 2) saving by setting the hierarchical stride == c, but you'll see that performance is much worse, as some tokens will have a c - 1 token gap to the last hierarchical token
-        # but this should provide better learning per-token
 
         if not self.no_compress:
-            x = rearrange(x, 'b (n c) d -> (b c) n d', c = c // self.stride)
+            x = rearrange(x, 'b (n c) d -> (b c) n d', c = axial_dim)
 
         if exists(self.attn):
             x = self.attn(token_shift(x)) + x
@@ -430,7 +431,7 @@ class HierarchicalBlock(nn.Module):
         x = self.ff(token_shift(x)) + x
 
         if not self.no_compress:
-            x = rearrange(x, '(b c) n d -> b (n c) d', c = c // self.stride)
+            x = rearrange(x, '(b c) n d -> b (n c) d', c = axial_dim)
 
         return x[:, :orig_seq_len]
 
@@ -607,15 +608,16 @@ class HierarchicalTransformer(nn.Module):
 
         # random projection quantizer, for another approach to hierarchical predictive coding
 
-        rpq_klass = partial(
-            RandomProjectionQuantizer,
-            num_codebooks = rq_num_codebooks,
-            codebook_dim = rq_codebook_dim,
-            codebook_size = rq_codebook_size
-        )
+        if self.prophet_loss_use_quantized:
+            rpq_klass = partial(
+                RandomProjectionQuantizer,
+                num_codebooks = rq_num_codebooks,
+                codebook_dim = rq_codebook_dim,
+                codebook_size = rq_codebook_size
+            )
 
-        self.rand_proj_quantizers = mlist([rpq_klass(dim = dim) for dim in dims])
-        self.rq_num_codebooks = rq_num_codebooks
+            self.rand_proj_quantizers = mlist([rpq_klass(dim = dim) for dim in dims])
+            self.rq_num_codebooks = rq_num_codebooks
 
         # to logit, for hierarchy set at predict_hierarchy_index, or all hierarchies
 
@@ -728,18 +730,20 @@ class HierarchicalTransformer(nn.Module):
                 predict_tokens = predict_tokens + pooled
                 tokens[self.predict_hierarchy_index] = predict_tokens
 
-        # random projections will be applied the tokens (normalized embedding without gamma) for hierarchical prediction
+        # if the researcher wants the randomly projected ids of either compressed tokens or embeddings of the hierarchies
 
         if return_random_proj_quantize_ids:
+            assert self.prophet_loss_use_quantized
+
             quantize_input = tokens if self.prophet_quantized_use_embed else post_compressed_tokens
             hierarchical_ids = apply_fns(self.rand_proj_quantizers, quantize_input)
             return hierarchical_ids
 
-        # mean centered with std 1 embeddings
+        # final normalized embeddings
 
         embeds = apply_fns(self.norms, tokens)
 
-        # if one wants all the hierarchical embeds
+        # if one wants all the normalized hierarchical embeds
 
         if return_hierarchical_embeds:
             return embeds
@@ -774,10 +778,12 @@ class HierarchicalTransformer(nn.Module):
                 recon_loss = compress.recon(t, ids)
                 recon_losses = recon_losses + recon_loss
 
-        # prophet losses for hierarchy tokens - prophetnet paper -> basically just predict N steps ahead instead of 1
+        # prophet losses for hierarchy tokens
 
         if self.should_prophet:
             if self.prophet_loss_use_quantized:
+                # using random projected quantizer of the next hierarchical token
+
                 quantize_input = tokens if self.prophet_quantized_use_embed else post_compressed_tokens
 
                 hierarchical_ids = apply_fns(self.rand_proj_quantizers, quantize_input)
@@ -788,12 +794,12 @@ class HierarchicalTransformer(nn.Module):
 
                     prophet_logits = compress.to_prophet(embed)
 
-                    mult = hierarchy // stride
+                    axial_dim = hierarchy // stride
 
-                    prophet_logits = curtail_seq_to_multiple(prophet_logits, mult)
-                    pred_ids = curtail_seq_to_multiple(pred_ids, mult)
+                    prophet_logits = curtail_seq_to_multiple(prophet_logits, axial_dim)
+                    pred_ids = curtail_seq_to_multiple(pred_ids, axial_dim)
 
-                    prophet_logits, pred_ids = map(lambda t: rearrange(t, 'b (n c) ... -> (b c) n ...', c = mult), (prophet_logits, pred_ids))
+                    prophet_logits, pred_ids = map(lambda t: rearrange(t, 'b (n c) ... -> (b c) n ...', c = axial_dim), (prophet_logits, pred_ids))
 
                     prophet_logits = rearrange(prophet_logits[:, :-1], 'b n (q c) -> (b q) c n', q = self.rq_num_codebooks)
                     pred_ids = rearrange(pred_ids[:, 1:], 'b n q -> (b q) n')
@@ -802,6 +808,9 @@ class HierarchicalTransformer(nn.Module):
                     prophet_losses = prophet_losses + prophet_loss
 
             else:
+                # or predicting the next N 1x base token ids
+                # like prophetnet paper
+
                 for compress, t in zip(self.compressors, embeds):
                     prophet_loss = compress.prophet(t, ids)
                     prophet_losses = prophet_losses + prophet_loss
