@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'simple-hierarchical-transformer',
   packages = find_packages(exclude=[]),
-  version = '0.1.0',
+  version = '0.0.28',
   license='MIT',
   description = 'Simple Hierarchical Transformer',
   author = 'Phil Wang',
@@ -22,7 +22,7 @@ setup(
     'einops>=0.4',
     'local-attention',
     'torch>=1.6',
-    'vector-quantize-pytorch>=1.6.23'
+    'vector-quantize-pytorch>=1.1.5'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',

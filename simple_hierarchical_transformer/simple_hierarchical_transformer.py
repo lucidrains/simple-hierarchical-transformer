@@ -205,6 +205,7 @@ class Compress(nn.Module):
         heads = 8,
         ignore_index = 0,
         should_recon = False,
+        should_prophet = False,
         prophet_num_predictions = None
     ):
         super().__init__()
@@ -215,6 +216,7 @@ class Compress(nn.Module):
         self.compress_factor = compress_factor
 
         self.should_recon = should_recon
+        self.should_prophet = should_prophet
 
         if self.no_compress:
             self.compress_fn = Linear(dim, dim_out) if dim != dim_out else nn.Identity()
@@ -234,7 +236,32 @@ class Compress(nn.Module):
             assert exists(num_tokens)
             self.to_recon = Linear(dim_out, compress_factor * num_tokens)
 
+        if should_prophet:
+            assert exists(prophet_num_predictions)
+            self.to_prophet = Linear(dim_out, prophet_num_predictions)
+
         self.ignore_index = ignore_index
+
+    def prophet(self, h, ids):
+        if not self.should_prophet:
+            return torch.zeros((), device = h.device).requires_grad_()
+
+        c = self.compress_factor
+        seq_len = ids.shape[-1]
+
+        prophet_logits = self.to_prophet(h)
+        prophet_logits = rearrange(prophet_logits, 'b n (c d) -> (b c) d n', c = c)
+
+        prophet_ids = F.pad(ids, (-1, c), value = self.ignore_index)
+        prophet_ids = tuple(prophet_ids[:, i:(seq_len + i)] for i in range(c))
+        prophet_ids = torch.stack(prophet_ids, dim = 1)
+        prophet_ids = rearrange(prophet_ids, 'b c n -> (b c) n')
+
+        if self.stride > 1:
+            prophet_ids = prophet_ids[..., ::self.stride]
+
+        prophet_loss = F.cross_entropy(prophet_logits, prophet_ids, ignore_index = self.ignore_index)
+        return prophet_loss
 
     def recon(self, h, ids):
         assert self.should_recon
@@ -512,7 +539,9 @@ class HierarchicalTransformer(nn.Module):
                 num_tokens = num_tokens,
                 compress_factor = hierarchy,
                 stride = stride,
-                should_recon = should_recon
+                should_recon = should_recon,
+                should_prophet = should_prophet,
+                prophet_num_predictions = ((hierarchy * num_tokens) if not prophet_loss_use_quantized else (rq_num_codebooks * rq_codebook_size))
             ))
 
         # post token embedding norms
@@ -755,22 +784,27 @@ class HierarchicalTransformer(nn.Module):
             if self.prophet_loss_use_quantized:
                 # using random projected quantizer of the next hierarchical token
 
-                quantize_input = embed if self.prophet_quantized_use_embed else post_compressed_tokens
+                quantize_input = tokens if self.prophet_quantized_use_embed else post_compressed_tokens
 
                 hierarchical_ids = apply_fns(self.rand_proj_quantizers, quantize_input)
 
-                for rand_proj_quantizer, hierarchy, stride, compress, embed, pred_ids in zip(self.rand_proj_quantizers, self.hierarchies, self.h_strides, self.compressors, embeds, hierarchical_ids):
-
+                for hierarchy, stride, compress, embed, pred_ids in zip(self.hierarchies, self.h_strides, self.compressors, embeds, hierarchical_ids):
                     if hierarchy == 1:
                         continue
 
-                    # vector-quantize-pytorch library can compute cross entropy loss on distance matrix
+                    prophet_logits = compress.to_prophet(embed)
 
-                    prophet_loss = rand_proj_quantizer(
-                        embed[:, :-1],
-                        indices = pred_ids[:, 1:]
-                    )
+                    axial_dim = hierarchy // stride
 
+                    prophet_logits = curtail_seq_to_multiple(prophet_logits, axial_dim)
+                    pred_ids = curtail_seq_to_multiple(pred_ids, axial_dim)
+
+                    prophet_logits, pred_ids = map(lambda t: rearrange(t, 'b (n c) ... -> (b c) n ...', c = axial_dim), (prophet_logits, pred_ids))
+
+                    prophet_logits = rearrange(prophet_logits[:, :-1], 'b n (q c) -> (b q) c n', q = self.rq_num_codebooks)
+                    pred_ids = rearrange(pred_ids[:, 1:], 'b n q -> (b q) n')
+
+                    prophet_loss = ce_loss_fn(prophet_logits, pred_ids)
                     prophet_losses = prophet_losses + prophet_loss
 
             else:
