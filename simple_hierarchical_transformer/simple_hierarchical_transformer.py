@@ -784,7 +784,7 @@ class HierarchicalTransformer(nn.Module):
             if self.prophet_loss_use_quantized:
                 # using random projected quantizer of the next hierarchical token
 
-                quantize_input = tokens if self.prophet_quantized_use_embed else post_compressed_tokens
+                quantize_input = embeds if self.prophet_quantized_use_embed else post_compressed_tokens
 
                 hierarchical_ids = apply_fns(self.rand_proj_quantizers, quantize_input)
 
