@@ -730,18 +730,18 @@ class HierarchicalTransformer(nn.Module):
                 predict_tokens = predict_tokens + pooled
                 tokens[self.predict_hierarchy_index] = predict_tokens
 
+        # final normalized embeddings
+
+        embeds = apply_fns(self.norms, tokens)
+
         # if the researcher wants the randomly projected ids of either compressed tokens or embeddings of the hierarchies
 
         if return_random_proj_quantize_ids:
             assert self.prophet_loss_use_quantized
 
-            quantize_input = tokens if self.prophet_quantized_use_embed else post_compressed_tokens
+            quantize_input = embeds if self.prophet_quantized_use_embed else post_compressed_tokens
             hierarchical_ids = apply_fns(self.rand_proj_quantizers, quantize_input)
             return hierarchical_ids
-
-        # final normalized embeddings
-
-        embeds = apply_fns(self.norms, tokens)
 
         # if one wants all the normalized hierarchical embeds
 
