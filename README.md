@@ -138,16 +138,6 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
 ```
 
 ```bibtex
-@article{Yan2020ProphetNetPF,
-    title   = {ProphetNet: Predicting Future N-gram for Sequence-to-Sequence Pre-training},
-    author  = {Yu Yan and Weizhen Qi and Yeyun Gong and Dayiheng Liu and Nan Duan and Jiusheng Chen and Ruofei Zhang and Ming Zhou},
-    journal = {ArXiv},
-    year    = {2020},
-    volume  = {abs/2001.04063}
-}
-```
-
-```bibtex
 @misc{su2021roformer,
     title   = {RoFormer: Enhanced Transformer with Rotary Position Embedding},
     author  = {Jianlin Su and Yu Lu and Shengfeng Pan and Bo Wen and Yunfeng Liu},
@@ -180,10 +170,13 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
 ```
 
 ```bibtex
-@inproceedings{Chiu2022SelfsupervisedLW,
-    title   = {Self-supervised Learning with Random-projection Quantizer for Speech Recognition},
-    author  = {Chung-Cheng Chiu and James Qin and Yu Zhang and Jiahui Yu and Yonghui Wu},
-    booktitle = {International Conference on Machine Learning},
-    year    = {2022}
+@article{Piergiovanni2023Mirasol3BAM,
+    title   = {Mirasol3B: A Multimodal Autoregressive model for time-aligned and contextual modalities},
+    author  = {A. J. Piergiovanni and Isaac Noble and Dahun Kim and Michael S. Ryoo and Victor Gomes and Anelia Angelova},
+    journal = {ArXiv},
+    year    = {2023},
+    volume  = {abs/2311.05698},
+    url     = {https://api.semanticscholar.org/CorpusID:265129010}
 }
 ```
+

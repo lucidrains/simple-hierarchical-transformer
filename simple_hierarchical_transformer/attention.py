@@ -1,5 +1,6 @@
 import torch
 from torch import nn, einsum
+from torch.nn import Module
 import torch.nn.functional as F
 
 from collections import namedtuple
@@ -32,7 +33,7 @@ print_once = once(print)
 
 # main class
 
-class Attend(nn.Module):
+class Attend(Module):
     def __init__(
         self,
         causal = False,
