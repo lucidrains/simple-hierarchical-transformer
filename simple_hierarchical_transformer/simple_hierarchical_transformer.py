@@ -4,12 +4,14 @@ from itertools import zip_longest
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from torch import nn, einsum, Tensor
 from torch.nn import Module, ModuleList
 
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+
+from torch_einops_utils import masked_mean
 
 from simple_hierarchical_transformer.attention import Attend
 
@@ -59,9 +61,91 @@ def eval_decorator(fn):
 def l2norm(t):
     return F.normalize(t, dim = -1)
 
-def cosine_sim_loss(x, y):
-    x, y = map(l2norm, (x, y))
-    return 1. - einsum('b n d, b n d -> b n', x, y).mean()
+class LatentAutoregressiveLoss(Module):
+    def __init__(
+        self,
+        dim,
+        use_rmsnorm = False,
+        sigreg_lambda = 0.05,
+        sigreg_loss_kwargs: dict | None = None
+    ):
+        super().__init__()
+        self.sigreg_lambda = sigreg_lambda
+        self.sigreg_loss_kwargs = default(sigreg_loss_kwargs, dict())
+
+        self.net = nn.Sequential(
+            RMSNorm(dim) if use_rmsnorm else nn.Identity(),
+            Linear(dim, dim)
+        )
+
+    @staticmethod
+    def sigreg_loss(
+        x,
+        num_slices = 1024,
+        domain = (-5, 5),
+        num_knots = 17
+    ):
+        # Randall Balestriero - https://arxiv.org/abs/2511.08544
+
+        dim, device = x.shape[-1], x.device
+
+        # slice sampling
+
+        rand_projs = torch.randn((num_slices, dim), device = device)
+        rand_projs = l2norm(rand_projs)
+
+        # integration points
+
+        t = torch.linspace(*domain, num_knots, device = device)
+
+        # theoretical CF for N(0, 1) and Gauss. window
+
+        exp_f = (-0.5 * t.square()).exp()
+
+        # empirical CF
+
+        x_t = einsum('... d, m d -> ... m', x, rand_projs)
+        x_t = rearrange(x_t, '... m -> (...) m')
+
+        x_t = rearrange(x_t, 'n m -> n m 1') * t
+        ecf = (1j * x_t).exp().mean(dim = 0)
+
+        # weighted L2 distance
+
+        err = ecf.sub(exp_f).abs().square().mul(exp_f)
+
+        return torch.trapz(err, t, dim = -1).mean()
+
+    def forward(
+        self,
+        x,
+        return_loss = True,
+        mask = None,
+        return_unreduced_loss = False
+    ):
+        pred_input = x[:, :-1]
+        target = x[:, 1:]
+
+        pred = self.net(pred_input)
+
+        if not return_loss:
+            return pred
+
+        loss = F.mse_loss(pred, target, reduction = 'none')
+
+        if return_unreduced_loss:
+            return loss, pred
+
+        if exists(mask):
+            mask = mask[:, 1:]
+
+        loss = masked_mean(loss, mask)
+        loss = loss.mean(dim=-1) if loss.ndim > 0 else loss
+
+        sigreg = self.sigreg_loss(target, **self.sigreg_loss_kwargs)
+        loss = loss * (1. - self.sigreg_lambda) + sigreg * self.sigreg_lambda
+
+        return loss, sigreg, pred
 
 # sampling helpers
 
@@ -106,7 +190,7 @@ class RotaryEmbedding(Module):
     def device(self):
         return next(self.buffers()).device
 
-    @autocast(enabled = False)
+    @autocast('cuda', enabled = False)
     def forward(self, seq_len):
         device = self.device
         t = torch.arange(seq_len, device = device).type_as(self.inv_freq)
@@ -135,7 +219,7 @@ def apply_rotary_pos_emb(pos, t, scale = 1.):
 
     return (t * pos.cos() * scale) + (rotate_half(t) * pos.sin() * scale)
 
-@autocast(enabled = False)
+@autocast('cuda', enabled = False)
 def apply_rotary_pos_emb_qk(rotary_emb, q, k):
     freqs, scale = rotary_emb
     q = apply_rotary_pos_emb(freqs, q, scale)
@@ -498,17 +582,14 @@ class HierarchicalTransformer(Module):
         dim_token_emb = max(dims)
         self.token_emb = nn.Embedding(num_tokens, dim_token_emb)
 
-        # hierarchy ar loss - following the same scheme as done in mirasol paper - cosine sim of prediction to next embedding
-
         self.hierarchical_ar_loss_weight = hierarchical_ar_loss_weight
         self.has_hierarchical_ar_loss = hierarchical_ar_loss_weight > 0.
 
-        self.to_hierarchical_preds = ModuleList([])
+        self.latent_ar_losses = ModuleList([])
 
         for dim, hierarchy in zip(dims, hierarchies):
-            linear_pred = nn.Linear(dim, dim) if hierarchy > 1 else None                
-
-            self.to_hierarchical_preds.append(linear_pred)
+            latent_ar = LatentAutoregressiveLoss(dim) if hierarchy > 1 else None
+            self.latent_ar_losses.append(latent_ar)
 
         # hierarchy compressions - 1x just uses the base token_emb weights
 
@@ -734,15 +815,16 @@ class HierarchicalTransformer(Module):
         # hierarchical ar loss
 
         hierarchical_ar_losses = self.zeros.requires_grad_()
+        hierarchical_sigreg_losses = self.zeros.requires_grad_()
 
-        for h_embed, maybe_h_pred_linear in zip(embeds, self.to_hierarchical_preds):
-            if not exists(maybe_h_pred_linear):
+        for h_embed, maybe_latent_ar in zip(embeds, self.latent_ar_losses):
+            if not exists(maybe_latent_ar):
                 continue
 
-            h_pred = maybe_h_pred_linear(h_embed)
-            h_ar_loss = cosine_sim_loss(h_pred[:, :-1], h_embed[:, 1:])
+            h_ar_loss, h_sigreg_loss, _ = maybe_latent_ar(h_embed)
 
             hierarchical_ar_losses = hierarchical_ar_losses + h_ar_loss
+            hierarchical_sigreg_losses = hierarchical_sigreg_losses + h_sigreg_loss
 
         # total loss
 
@@ -750,4 +832,4 @@ class HierarchicalTransformer(Module):
                      recon_losses * self.recon_loss_weight + \
                      hierarchical_ar_losses * self.hierarchical_ar_loss_weight
 
-        return total_loss, (ce_loss, recon_losses, hierarchical_ar_losses)
+        return total_loss, (ce_loss, recon_losses, hierarchical_ar_losses, hierarchical_sigreg_losses)

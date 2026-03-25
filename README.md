@@ -4,8 +4,6 @@ Experiments around a simple idea for inducing multiple hierarchical predictive c
 
 So far, the idea has passed the litmus test from a research friend. Will bring it to completion in the next week or so. If it does not work out, I'll leave the negative experimental results as well as the repository around, and maybe some PhD student can build upon it.
 
-Update: I think it is working 🤞 
-
 ## Appreciation
 
 - <a href="https://stability.ai/">StabilityAI</a> for the sponsorship to carry out this independent research
@@ -170,13 +168,13 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
 ```
 
 ```bibtex
-@article{Piergiovanni2023Mirasol3BAM,
-    title   = {Mirasol3B: A Multimodal Autoregressive model for time-aligned and contextual modalities},
-    author  = {A. J. Piergiovanni and Isaac Noble and Dahun Kim and Michael S. Ryoo and Victor Gomes and Anelia Angelova},
-    journal = {ArXiv},
-    year    = {2023},
-    volume  = {abs/2311.05698},
-    url     = {https://api.semanticscholar.org/CorpusID:265129010}
+@misc{balestriero2025lejepa,
+    title   = {LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics},
+    author  = {Randall Balestriero and Yann LeCun},
+    year    = {2025},
+    eprint  = {2511.08544},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2511.08544},
 }
 ```
-

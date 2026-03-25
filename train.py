@@ -96,7 +96,7 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
     model.train()
 
     for _ in range(GRADIENT_ACCUMULATE_EVERY):
-        loss, (ce_loss, recon_loss, prophet_loss) = model(next(train_loader), return_loss = True)
+        loss, (ce_loss, recon_losses, latent_ar_loss, sigreg_loss) = model(next(train_loader), return_loss = True)
         accelerator.backward(loss / GRADIENT_ACCUMULATE_EVERY)
 
     acc_print(f"training loss: {ce_loss.item()}")
