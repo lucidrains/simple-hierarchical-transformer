@@ -4,14 +4,14 @@ from itertools import zip_longest
 
 import torch
 import torch.nn.functional as F
-from torch.amp import autocast
-from torch import nn, einsum, Tensor
+from torch import nn
 from torch.nn import Module, ModuleList
 
-from einops import rearrange, repeat
+from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange
 
-from torch_einops_utils import masked_mean
+from torch_einops_utils import masked_mean, temp_eval, shift_right
+from rotary_embedding_torch import RotaryEmbedding
 
 from simple_hierarchical_transformer.attention import Attend
 
@@ -39,113 +39,13 @@ def apply_fns(fns, tensors):
     return [fn(tensor) for fn, tensor in zip(fns, tensors)]
 
 def cast_tuple(t, length = 1):
-    return t if isinstance(t, tuple) else ((t,) * length)
+    return tuple(t) if isinstance(t, (tuple, list)) else ((t,) * length)
 
 def default(*vals):
     for val in vals:
         if exists(val):
             return val
     return None
-
-def eval_decorator(fn):
-    def inner(model, *args, **kwargs):
-        was_training = model.training
-        model.eval()
-        out = fn(model, *args, **kwargs)
-        model.train(was_training)
-        return out
-    return inner
-
-# tensor helpers
-
-def l2norm(t):
-    return F.normalize(t, dim = -1)
-
-class LatentAutoregressiveLoss(Module):
-    def __init__(
-        self,
-        dim,
-        use_rmsnorm = False,
-        sigreg_lambda = 0.05,
-        sigreg_loss_kwargs: dict | None = None
-    ):
-        super().__init__()
-        self.sigreg_lambda = sigreg_lambda
-        self.sigreg_loss_kwargs = default(sigreg_loss_kwargs, dict())
-
-        self.net = nn.Sequential(
-            RMSNorm(dim) if use_rmsnorm else nn.Identity(),
-            Linear(dim, dim)
-        )
-
-    @staticmethod
-    def sigreg_loss(
-        x,
-        num_slices = 1024,
-        domain = (-5, 5),
-        num_knots = 17
-    ):
-        # Randall Balestriero - https://arxiv.org/abs/2511.08544
-
-        dim, device = x.shape[-1], x.device
-
-        # slice sampling
-
-        rand_projs = torch.randn((num_slices, dim), device = device)
-        rand_projs = l2norm(rand_projs)
-
-        # integration points
-
-        t = torch.linspace(*domain, num_knots, device = device)
-
-        # theoretical CF for N(0, 1) and Gauss. window
-
-        exp_f = (-0.5 * t.square()).exp()
-
-        # empirical CF
-
-        x_t = einsum('... d, m d -> ... m', x, rand_projs)
-        x_t = rearrange(x_t, '... m -> (...) m')
-
-        x_t = rearrange(x_t, 'n m -> n m 1') * t
-        ecf = (1j * x_t).exp().mean(dim = 0)
-
-        # weighted L2 distance
-
-        err = ecf.sub(exp_f).abs().square().mul(exp_f)
-
-        return torch.trapz(err, t, dim = -1).mean()
-
-    def forward(
-        self,
-        x,
-        return_loss = True,
-        mask = None,
-        return_unreduced_loss = False
-    ):
-        pred_input = x[:, :-1]
-        target = x[:, 1:]
-
-        pred = self.net(pred_input)
-
-        if not return_loss:
-            return pred
-
-        loss = F.mse_loss(pred, target, reduction = 'none')
-
-        if return_unreduced_loss:
-            return loss, pred
-
-        if exists(mask):
-            mask = mask[:, 1:]
-
-        loss = masked_mean(loss, mask)
-        loss = loss.mean(dim=-1) if loss.ndim > 0 else loss
-
-        sigreg = self.sigreg_loss(target, **self.sigreg_loss_kwargs)
-        loss = loss * (1. - self.sigreg_lambda) + sigreg * self.sigreg_lambda
-
-        return loss, sigreg, pred
 
 # sampling helpers
 
@@ -166,71 +66,11 @@ def top_k(logits, thres = 0.9):
     probs.scatter_(1, ind, val)
     return probs
 
-# rotary positional embedding w/ xpos
-# https://arxiv.org/abs/2104.09864
-# https://arxiv.org/abs/2212.10554v1
-
-class RotaryEmbedding(Module):
-    def __init__(
-        self,
-        dim,
-        scale_base = 512,
-        use_xpos = True
-    ):
-        super().__init__()
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
-
-        self.use_xpos = use_xpos
-        self.scale_base = scale_base
-        scale = (torch.arange(0, dim, 2) + 0.4 * dim) / (1.4 * dim)
-        self.register_buffer('scale', scale)
-
-    @property
-    def device(self):
-        return next(self.buffers()).device
-
-    @autocast('cuda', enabled = False)
-    def forward(self, seq_len):
-        device = self.device
-        t = torch.arange(seq_len, device = device).type_as(self.inv_freq)
-        freqs = torch.einsum('i , j -> i j', t, self.inv_freq)
-        freqs = torch.cat((freqs, freqs), dim = -1)
-
-        if not self.use_xpos:
-            return freqs, torch.ones(1, device = device)
-
-        power = (t - (seq_len // 2)) / self.scale_base
-        scale = self.scale ** rearrange(power, 'n -> n 1')
-        scale = torch.cat((scale, scale), dim = -1)
-
-        return freqs, scale
-
-def rotate_half(x):
-    x1, x2 = x.chunk(2, dim=-1)
-    return torch.cat((-x2, x1), dim=-1)
-
-def apply_rotary_pos_emb(pos, t, scale = 1.):
-    seq_len = t.shape[-2]
-
-    pos = pos[..., -seq_len:, :]
-    if not isinstance(scale, (int, float)):
-        scale = scale[..., -seq_len:, :]
-
-    return (t * pos.cos() * scale) + (rotate_half(t) * pos.sin() * scale)
-
-@autocast('cuda', enabled = False)
-def apply_rotary_pos_emb_qk(rotary_emb, q, k):
-    freqs, scale = rotary_emb
-    q = apply_rotary_pos_emb(freqs, q, scale)
-    k = apply_rotary_pos_emb(freqs, k, scale ** -1)
-    return q, k
-
 # token shift, from Peng et al of RWKV
 
 def token_shift(t):
     t, t_shift = t.chunk(2, dim = -1)
-    t_shift = F.pad(t_shift, (0, 0, 1, -1))
+    t_shift = shift_right(t_shift, dim = -2)
     return torch.cat((t, t_shift), dim = -1)
 
 # hierarchy related classes
@@ -420,7 +260,7 @@ class Attention(Module):
         dim_inner = dim_head * heads
 
         self.norm = RMSNorm(dim)
-        self.rotary_emb = RotaryEmbedding(dim_head)
+        self.rotary_emb = RotaryEmbedding(dim_head, use_xpos = True)
 
         self.attend = Attend(causal = True, use_flash_attn = use_flash_attn)
 
@@ -428,14 +268,12 @@ class Attention(Module):
         self.to_out = Linear(dim_inner, dim)
 
     def forward(self, x):
-        n = x.shape[-2]
         x = self.norm(x)
 
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), (q, k, v))
 
-        rotary_emb = self.rotary_emb(n)
-        q, k = apply_rotary_pos_emb_qk(rotary_emb, q, k)
+        q, k = self.rotary_emb.rotate_queries_and_keys(q, k)
 
         out = self.attend(q, k, v)
 
@@ -482,10 +320,12 @@ class HierarchicalBlock(Module):
 
         # hierarchical attention is performed with a simple axial attention
 
-        # this, and using a convolution for compressing at the beginning
-        # is one of the improvements on top of hourglass transformer
-        # the downside is that the savings are only O(c) instead of O(c ** 2) as in hourglass transformer
-        # you can get the O(c ** 2) saving by setting the hierarchical stride == c, but you'll see that performance is much worse, as some tokens will have a c - 1 token gap to the last hierarchical token
+        # this, and compressing with a convolution, is one of the improvements
+        # on top of hourglass transformer
+        # the downside is the savings are only O(c) instead of O(c ** 2)
+        # the O(c ** 2) saving can be had by setting hierarchical stride to c,
+        # but performance is much worse, as some tokens will have a c - 1 gap
+        # to the last hierarchical token
 
         if not self.no_compress:
             x = rearrange(x, 'b (n c) d -> (b c) n d', c = axial_dim)
@@ -499,6 +339,83 @@ class HierarchicalBlock(Module):
             x = rearrange(x, '(b c) n d -> b (n c) d', c = axial_dim)
 
         return x[:, :orig_seq_len]
+
+# next latent prediction
+
+class MSECosineSimLoss(Module):
+    def __init__(self, weight = 0.9):
+        super().__init__()
+        self.weight = weight
+
+    def forward(self, pred, target):
+        mse = F.mse_loss(pred, target, reduction = 'none')
+        cos = 1. - F.cosine_similarity(pred, target, dim = -1)
+        cos = rearrange(cos, '... -> ... 1')
+        return mse.lerp(cos, self.weight)
+
+class CausalChunkSummarizer(Module):
+    def __init__(
+        self,
+        *,
+        dim_in,
+        dim_out,
+        compress_factor = 1,
+        stride = 1
+    ):
+        super().__init__()
+        assert compress_factor > 0 and stride > 0
+        self.compress_factor = compress_factor
+        self.stride = stride
+        self.proj = nn.Linear(dim_in, dim_out) if dim_in != dim_out else nn.Identity()
+
+    def forward(self, token_embeds):
+        c, s = self.compress_factor, self.stride
+
+        if c == 1:
+            return self.proj(token_embeds[..., ::s, :])
+
+        token_embeds = F.pad(token_embeds, (0, 0, c - 1, 0))
+        windows = token_embeds.unfold(1, c, s)
+
+        indices = torch.arange(windows.shape[1], device = token_embeds.device)
+        counts = (indices * s + 1).clamp(max = c)
+
+        pooled = windows.sum(dim = -1) / rearrange(counts, 'n -> n 1')
+        return self.proj(pooled)
+
+class NextLatDynamics(Module):
+    def __init__(
+        self,
+        dim,
+        hidden_dim = None,
+        num_layers = 3
+    ):
+        super().__init__()
+        hidden_dim = default(hidden_dim, dim)
+        assert num_layers > 0
+
+        layers = [nn.LayerNorm(dim * 2)]
+
+        for i in range(num_layers):
+            is_last = i == (num_layers - 1)
+            in_dim = dim * 2 if i == 0 else hidden_dim
+            out_dim = dim if is_last else hidden_dim
+
+            layers.append(nn.Linear(in_dim, out_dim))
+
+            if not is_last:
+                layers.append(nn.GELU())
+
+        self.net = nn.Sequential(*layers)
+
+        # zero init last layer so dynamics starts off as identity
+
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, next_chunk_summary, curr_latent):
+        delta = self.net(torch.cat((curr_latent, next_chunk_summary), dim = -1))
+        return curr_latent + delta
 
 class HierarchicalTransformer(Module):
     def __init__(
@@ -514,11 +431,20 @@ class HierarchicalTransformer(Module):
         hierarchies = 1,
         window_sizes = None,
         hierarchical_stride = 1,
-        hierarchy_merge_all = False,  # whether to pass the pooled hierarchical information back to all hierarchies or just one doing the prediction
+        hierarchy_merge_all = False,  # whether to pool into all hierarchies
         predict_hierarchy = None,
         predict_use_all_hierarchy = False,
         recon_loss_weight = 0.1,
-        hierarchical_ar_loss_weight = 0.25,
+        next_latent_loss_weight = 0.25,
+        next_latent_loss_type = 'mse_and_cosine_sim',
+        num_rollouts = 1,
+        chunk_summarizers = None,
+        detach_summaries = True,
+        dynamics_hidden_dim = None,
+        dynamics_num_layers = 3,
+        dynamic_rollout_loss_weight = True,
+        dynamic_loss_decay = 1.0,
+        rollout_weights = None,
         ignore_index = 0,
         use_flash_attn = False,
     ):
@@ -531,7 +457,7 @@ class HierarchicalTransformer(Module):
 
         self.hierarchies = hierarchies
 
-        # just use a simple tuple list per hyperparameter to customize each hierarchy
+        # a tuple per hyperparameter, to customize each hierarchy
 
         num_hierarchies = len(hierarchies)
 
@@ -559,8 +485,8 @@ class HierarchicalTransformer(Module):
 
         assert len(hierarchical_stride) == num_hierarchies
 
-        # this determines to which hierarchy is everything pooled into for final prediction
-        # however, final next token prediction can also use all hierarchies with `predict_use_all_hierarchy`
+        # which hierarchy receives the pooled information for final prediction
+        # final prediction can use all hierarchies (predict_use_all_hierarchy)
 
         predict_hierarchy = default(predict_hierarchy, min(hierarchies))
         self.predict_hierarchy_index = hierarchies.index(predict_hierarchy)
@@ -582,15 +508,6 @@ class HierarchicalTransformer(Module):
         dim_token_emb = max(dims)
         self.token_emb = nn.Embedding(num_tokens, dim_token_emb)
 
-        self.hierarchical_ar_loss_weight = hierarchical_ar_loss_weight
-        self.has_hierarchical_ar_loss = hierarchical_ar_loss_weight > 0.
-
-        self.latent_ar_losses = ModuleList([])
-
-        for dim, hierarchy in zip(dims, hierarchies):
-            latent_ar = LatentAutoregressiveLoss(dim) if hierarchy > 1 else None
-            self.latent_ar_losses.append(latent_ar)
-
         # hierarchy compressions - 1x just uses the base token_emb weights
 
         self.compressors = ModuleList([])
@@ -604,6 +521,62 @@ class HierarchicalTransformer(Module):
                 stride = stride,
                 should_recon = should_recon
             ))
+
+        # next latent prediction, in effect when training with return_loss
+        # each hierarchy predicts its next latent, conditioned on a summary of
+        # the next causal chunk of tokens
+
+        self.next_latent_loss_weight = cast_tuple(next_latent_loss_weight, num_hierarchies)
+        assert len(self.next_latent_loss_weight) == num_hierarchies, 'next_latent_loss_weight must either be a float or a tuple with a weight per hierarchy'
+        assert all([weight >= 0. for weight in self.next_latent_loss_weight])
+
+        self.has_next_latent_loss = any([weight > 0. for weight in self.next_latent_loss_weight])
+
+        if callable(next_latent_loss_type):
+            self.next_latent_loss_fn = next_latent_loss_type
+        elif next_latent_loss_type == 'mse_and_cosine_sim':
+            self.next_latent_loss_fn = MSECosineSimLoss()
+        elif next_latent_loss_type == 'mse':
+            self.next_latent_loss_fn = nn.MSELoss(reduction = 'none')
+        elif next_latent_loss_type == 'smooth_l1':
+            self.next_latent_loss_fn = nn.SmoothL1Loss(reduction = 'none')
+        else:
+            raise ValueError(f'unknown next latent loss type {next_latent_loss_type}')
+
+        assert num_rollouts > 0, 'num_rollouts must be greater than 0'
+        self.num_rollouts = num_rollouts
+        self.detach_summaries = detach_summaries
+        self.dynamic_rollout_loss_weight = dynamic_rollout_loss_weight
+        self.dynamic_loss_decay = dynamic_loss_decay
+
+        # rollout loss weights
+
+        rollout_weights = default(rollout_weights, (1.,) * num_rollouts)
+        assert len(rollout_weights) == num_rollouts, 'rollout_weights must have a weight per rollout step'
+        rollout_weights = torch.tensor(rollout_weights)
+
+        self.register_buffer('rollout_loss_weights', rollout_weights / rollout_weights.sum(), persistent = False)
+
+        # chunk summarizers and latent dynamics, per hierarchy
+
+        chunk_summarizers = cast_tuple(chunk_summarizers, num_hierarchies)
+        assert len(chunk_summarizers) == num_hierarchies, 'chunk_summarizers must have one entry per hierarchy'
+
+        self.chunk_summarizers = ModuleList([])
+        self.latent_dynamics = ModuleList([])
+
+        for dim, hierarchy, stride, summarizer in zip(dims, hierarchies, hierarchical_stride, chunk_summarizers):
+            if not exists(summarizer):
+                summarizer = CausalChunkSummarizer(
+                    dim_in = dim_token_emb,
+                    dim_out = dim,
+                    compress_factor = hierarchy,
+                    stride = stride
+                )
+
+            assert isinstance(summarizer, Module), 'chunk summarizer must be a module with forward (b, n, dim_in) -> (b, ceil(n / stride), dim_out)'
+            self.chunk_summarizers.append(summarizer)
+            self.latent_dynamics.append(NextLatDynamics(dim = dim, hidden_dim = dynamics_hidden_dim, num_layers = dynamics_num_layers))
 
         # post token embedding norms
 
@@ -625,7 +598,7 @@ class HierarchicalTransformer(Module):
 
             for hierarchy, h_stride, h_dim, h_window_size, h_dim_head, h_heads, h_ff_mult in zip(hierarchies, hierarchical_stride, dims, window_sizes, dim_head, heads, ff_mult):
 
-                # make sure the window size never exceeds the effective sequence length
+                # window size cannot exceed the effective sequence length
 
                 effective_seq_len = seq_len // hierarchy
 
@@ -650,7 +623,8 @@ class HierarchicalTransformer(Module):
             self.layers.append(hierarchical_layer)
 
             # for merging the information across hierarchies
-            # for now, only one direction, from all hierarchies to the hierarchy that is being used to make predictions on, set by predict_hierarchy_index above
+            # only one direction for now, from all hierarchies into
+            # predict_hierarchy_index, the one doing the prediction
 
             if not self.need_hierarchical_merge:
                 continue
@@ -667,7 +641,7 @@ class HierarchicalTransformer(Module):
 
         self.norms = ModuleList([nn.LayerNorm(dim) for dim in dims])
 
-        # to logit, for hierarchy set at predict_hierarchy_index, or all hierarchies
+        # to logits, for the predict hierarchy, or all hierarchies
 
         self.predict_use_all_hierarchy = predict_use_all_hierarchy
         logit_dim_in = sum(dims) if predict_use_all_hierarchy else hierarchy_predict_dim
@@ -681,7 +655,7 @@ class HierarchicalTransformer(Module):
         self.register_buffer('zeros', torch.tensor(0.), persistent = False)
 
     @torch.no_grad()
-    @eval_decorator
+    @temp_eval
     def generate(
         self,
         prompt,
@@ -707,12 +681,84 @@ class HierarchicalTransformer(Module):
     def device(self):
         return next(self.parameters()).device
     
+    def compute_next_latent_losses(self, embeds, token_embeds, ids):
+        # each hierarchy predicts its next latent, conditioned on a summary
+        # of the next causal chunk of tokens
+
+        next_latent_loss = self.zeros.requires_grad_()
+
+        if not self.has_next_latent_loss:
+            return next_latent_loss, tuple(self.zeros for _ in embeds)
+
+        num_rollouts, ignore_index = self.num_rollouts, self.ignore_index
+        next_latent_per_hierarchy = []
+
+        for h_embeds, summarizer, dynamics, weight, stride in zip(embeds, self.chunk_summarizers, self.latent_dynamics, self.next_latent_loss_weight, self.h_strides):
+            seq_len = h_embeds.shape[-2]
+
+            assert seq_len > num_rollouts, f'effective sequence length of hierarchy ({seq_len}) must be greater than num_rollouts ({num_rollouts}) for next latent prediction'
+
+            summarizer_input = token_embeds.detach() if self.detach_summaries else token_embeds
+            next_chunk_summaries = summarizer(summarizer_input)
+
+            assert next_chunk_summaries.shape[-2] == seq_len, f'chunk summarizer must return {seq_len} summaries, returned {next_chunk_summaries.shape[-2]}'
+
+            # valid if the last token of its causal chunk is valid
+
+            end_positions = (torch.arange(seq_len, device = ids.device) * stride).clamp(max = ids.shape[-1] - 1)
+            hier_mask = (ids != ignore_index)[:, end_positions]
+
+            num_predict = seq_len - num_rollouts
+            curr_latent = h_embeds[:, :num_predict]
+
+            cum_rollout_loss = None
+            hier_loss = self.zeros.requires_grad_()
+
+            for roll in range(num_rollouts):
+                start = roll + 1
+
+                # summaries of the next chunk, stop-gradient by default
+
+                step_summaries = next_chunk_summaries[:, start : start + num_predict]
+                targets = h_embeds[:, start : start + num_predict]
+                step_mask = hier_mask[:, start : start + num_predict]
+
+                # one step of latent dynamics
+
+                curr_latent = dynamics(step_summaries, curr_latent)
+
+                loss = self.next_latent_loss_fn(curr_latent, targets.detach())
+
+                # static rollout weighting
+
+                weighted = loss * self.rollout_loss_weights[roll]
+
+                # dynamic weighting - downweight steps by accumulated loss
+
+                if self.dynamic_rollout_loss_weight:
+                    step_loss = reduce(loss.detach(), 'b n d -> b n', 'mean')
+
+                    if exists(cum_rollout_loss):
+                        dynamic_weight = (-self.dynamic_loss_decay * cum_rollout_loss).exp()
+                        weighted = weighted * rearrange(dynamic_weight, 'b n -> b n 1')
+
+                    cum_rollout_loss = default(cum_rollout_loss, 0.) + step_loss
+
+                step_mask = rearrange(step_mask, 'b n -> b n 1')
+                hier_loss = hier_loss + masked_mean(weighted, step_mask)
+
+            next_latent_per_hierarchy.append(hier_loss)
+            next_latent_loss = next_latent_loss + weight * hier_loss
+
+        return next_latent_loss, tuple(next_latent_per_hierarchy)
+
     def forward(
         self,
         ids,
         return_loss = False,
         return_hierarchical_token_embeds = False,
         return_hierarchical_embeds = False,
+        return_logits_and_embeds = False,
         ablate_hierarchical_merge = False
     ):
         """
@@ -737,7 +783,7 @@ class HierarchicalTransformer(Module):
 
         x = self.token_emb(ids)
 
-        # for every hierarchy, compress token embeddings appropriately to the hierarchical embeddings
+        # compress token embeddings for each hierarchy
 
         tokens = []
 
@@ -760,8 +806,8 @@ class HierarchicalTransformer(Module):
 
             tokens = apply_fns(layer, tokens)
 
-            # pool the information all hierarchies
-            # and then update the tokens that will be used to make the final autoregressive prediction
+            # pool the information across hierarchies
+            # update the tokens used for final next token prediction
 
             if not self.need_hierarchical_merge or ablate_hierarchical_merge:
                 continue
@@ -795,6 +841,9 @@ class HierarchicalTransformer(Module):
 
         logits = self.to_logits(predict_embed)
 
+        if return_logits_and_embeds:
+            return logits, embeds
+
         if not return_loss:
             return logits
 
@@ -803,33 +852,20 @@ class HierarchicalTransformer(Module):
         logits = rearrange(logits, 'b n c -> b c n')
         ce_loss = F.cross_entropy(logits, labels, ignore_index = self.ignore_index)
 
+        # next latent prediction losses, for each hierarchy
+
+        next_latent_loss, next_latent_per_hierarchy = self.compute_next_latent_losses(embeds, x, ids)
+
         # reconstruction losses for hierarchy tokens
 
-        recon_losses = self.zeros.requires_grad_()
+        recon_loss = self.zeros.requires_grad_()
 
         if self.should_recon:
             for compress, t in zip(self.compressors, embeds):
-                recon_loss = compress.recon(t, ids)
-                recon_losses = recon_losses + recon_loss
-
-        # hierarchical ar loss
-
-        hierarchical_ar_losses = self.zeros.requires_grad_()
-        hierarchical_sigreg_losses = self.zeros.requires_grad_()
-
-        for h_embed, maybe_latent_ar in zip(embeds, self.latent_ar_losses):
-            if not exists(maybe_latent_ar):
-                continue
-
-            h_ar_loss, h_sigreg_loss, _ = maybe_latent_ar(h_embed)
-
-            hierarchical_ar_losses = hierarchical_ar_losses + h_ar_loss
-            hierarchical_sigreg_losses = hierarchical_sigreg_losses + h_sigreg_loss
+                recon_loss = recon_loss + compress.recon(t, ids)
 
         # total loss
 
-        total_loss = ce_loss + \
-                     recon_losses * self.recon_loss_weight + \
-                     hierarchical_ar_losses * self.hierarchical_ar_loss_weight
+        total_loss = ce_loss + next_latent_loss + recon_loss * self.recon_loss_weight
 
-        return total_loss, (ce_loss, recon_losses, hierarchical_ar_losses, hierarchical_sigreg_losses)
+        return total_loss, (ce_loss, next_latent_loss, recon_loss, next_latent_per_hierarchy)

@@ -46,6 +46,9 @@ def decode_tokens(tokens):
 
 # instantiate transformer
 
+# next latent prediction is built in and applied to all hierarchies
+# cross entropy next token loss is kept on the finest resolution
+
 model = HierarchicalTransformer(
     num_tokens = 256,
     dim = 1024,
@@ -53,7 +56,9 @@ model = HierarchicalTransformer(
     seq_len = SEQ_LEN,
     hierarchies = (1, 2),
     window_sizes = (32, 64),
-    use_flash_attn = True
+    use_flash_attn = True,
+    next_latent_loss_weight = 0.25,
+    num_rollouts = 2
 ).to(device)
 
 # prepare enwik8 data
@@ -96,10 +101,10 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval = 10.0, desc = "training"):
     model.train()
 
     for _ in range(GRADIENT_ACCUMULATE_EVERY):
-        loss, (ce_loss, recon_losses, latent_ar_loss, sigreg_loss) = model(next(train_loader), return_loss = True)
+        loss, (ce_loss, next_latent_loss, recon_loss, _) = model(next(train_loader), return_loss = True)
         accelerator.backward(loss / GRADIENT_ACCUMULATE_EVERY)
 
-    acc_print(f"training loss: {ce_loss.item()}")
+    acc_print(f"training loss: {ce_loss.item()} | next latent loss: {next_latent_loss.item()} | recon loss: {recon_loss.item()}")
     accelerator.clip_grad_norm_(model.parameters(), 0.5)
 
     optim.step()

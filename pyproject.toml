@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "simple-hierarchical-transformer"
-version = "0.3.0"
+version = "0.4.0"
 description = "Simple Hierarchical Transformer"
 authors = [
   { name = "Phil Wang", email = "lucidrains@gmail.com" }
 ]
 license = "MIT"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 keywords = [
   "artificial intelligence",
   "deep learning",
@@ -28,9 +28,10 @@ classifiers = [
 ]
 dependencies = [
   "accelerate",
-  "einops>=0.7.0",
+  "einops>=0.8.0",
   "local-attention",
-  "torch>=2.0",
+  "rotary-embedding-torch",
+  "torch>=2.5",
   "torch-einops-utils"
 ]
 
@@ -46,4 +47,9 @@ include = [
     "README.md",
     "LICENSE",
     "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "."
 ]

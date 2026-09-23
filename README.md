@@ -45,6 +45,70 @@ loss.backward()
 logits = model(ids)
 ```
 
+## Next Latent Prediction
+
+Next latent prediction, following the scheme proposed by
+<a href="https://arxiv.org/abs/2511.05963">Teoh et al.</a>, is built into the
+model and always in effect when training with `return_loss = True`. Each
+hierarchy predicts its next latent from the current latent, conditioned on a
+summary of the next causal chunk of tokens. Next token cross entropy is kept on
+the finest resolution.
+
+Latent targets and chunk summaries are stop-gradient. The prediction loss
+interpolates between mean squared error and cosine similarity, and further
+rollout steps are dynamically downweighted by the accumulated loss of the
+preceding steps.
+
+```python
+import torch
+from simple_hierarchical_transformer import HierarchicalTransformer
+
+model = HierarchicalTransformer(
+    num_tokens = 20000,
+    dim = 512,
+    depth = 6,
+    dim_head = 64,
+    heads = 8,
+    seq_len = 2048,
+    hierarchies = (1, 2, 8),
+    window_sizes = (32, 64, None),
+    next_latent_loss_weight = 0.25,       # float, or a tuple per hierarchy
+    num_rollouts = 2,                     # number of rollout steps
+    dynamic_rollout_loss_weight = True    # on by default
+)
+
+ids = torch.randint(0, 20000, (1, 2048))
+
+loss, (ce, next_latent, recon, per_hierarchy) = model(ids, return_loss = True)
+loss.backward()
+
+# after much training
+
+logits = model(ids)
+```
+
+Chunk summaries default to a causal mean pool over the token embeddings of
+each hierarchy chunk, mirroring the receptive field of the corresponding
+compressor. Custom summarizers can be passed per hierarchy as any `nn.Module`
+mapping `(b, n, dim_token_emb)` to `(b, ceil(n / stride), hierarchy_dim)`
+through a causal function of the chunk. Setting `detach_summaries = False`
+allows gradients from the latent dynamics loss to flow through the summarizer
+input.
+
+```python
+from torch import nn
+from simple_hierarchical_transformer import HierarchicalTransformer
+
+class ActionChunkSummarizer(nn.Module):
+    ...
+
+model = HierarchicalTransformer(
+    ...,
+    chunk_summarizers = (None, None, ActionChunkSummarizer()),
+    detach_summaries = True
+)
+```
+
 By not specifying `hierarchies` and `window_sizes`, you basically default to a regular autoregressive transformer with attention across full sequence length.
 
 ```python
@@ -98,6 +162,7 @@ model = HierarchicalTransformer(
 - [x] complete ability to add any number of hierarchies, and designate which hierarchy will pool the information from the others for prediction
 - [x] fully customizable dimensions across hierarchies, as higher hierarchies require greater model dimensions
 - [x] add prophet losses for hierarchical branches
+- [x] replace hierarchical autoregressive loss with next latent prediction
 - [x] allow for repeating hierarchy tokens for fine tokens in the future, as position may matter less as one goes up the hierarchy. but not a priority, get things working first - implemented as `hierarchical_stride`
 - [x] allow for some layers to only rely on token shift, no attention
 - [x] random projections + vq, as was done in universal speech model paper from brain - for hierarchical predictive coding
@@ -168,13 +233,13 @@ And my renewed interest in hierarchical approaches came from reading <a href="ht
 ```
 
 ```bibtex
-@misc{balestriero2025lejepa,
-    title   = {LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics},
-    author  = {Randall Balestriero and Yann LeCun},
-    year    = {2025},
-    eprint  = {2511.08544},
+@misc{teoh2026nextlatentpredictiontransformerslearn,
+    title   = {Next-Latent Prediction Transformers Learn Compact World Models},
+    author  = {Jayden Teoh and Manan Tomar and Kwangjun Ahn and Edward S. Hu and Tim Pearce and Pratyusha Sharma and Akshay Krishnamurthy and Riashat Islam and Alex Lamb and John Langford},
+    year    = {2026},
+    eprint  = {2511.05963},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2511.08544},
+    url     = {https://arxiv.org/abs/2511.05963},
 }
 ```
